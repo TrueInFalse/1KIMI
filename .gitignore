@@ -1,0 +1,18 @@
+# 大文件和敏感数据
+checkpoints/*.pth
+checkpoints/*.pt
+*.pth
+*.pt
+pretrained_weights/
+DRIVE/
+data/
+logs/
+results/
+__pycache__/
+.ipynb_checkpoints/
+.vscode/
+
+# 临时文件
+*.log
+*.tmp
+.DS_Store
