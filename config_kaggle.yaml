@@ -1,7 +1,0 @@
-data:
-  use_kaggle_combined: true
-  img_size: 512
-training:
-  batch_size: 4
-  num_workers: 4      # DataLoader的worker数
-  shuffle: true       # 是否打乱训练数据
