@@ -90,25 +90,30 @@ pip install pyyaml tqdm matplotlib
 ```
 
 **版本控制**：
-Clash 崩溃后快速恢复（30秒修复）。如果推送时卡住/超时，按此顺序执行：
-```bash
-# Step 1: 确认死亡
-curl --socks5 127.0.0.1:7890 -I https://github.com
-# 如果无输出或 "Connection refused"，进入 Step 2
 
-# Step 2: 清理僵尸进程（如果有）
-pkill -f clash-meta 2>/dev/null
+- **SSH 密钥认证 + 直连 GitHub**（推荐）：已完成配置
 
-# Step 3: 重启
-cd ~/clash
-nohup ./clash-meta -f ~/.config/clash/config.yaml > clash.log 2>&1 &
+- Clash代理不再启用：
+    Clash 崩溃后快速恢复（30秒修复）。如果推送时卡住/超时，按此顺序执行：
 
-# Step 4: 验证（等待2秒）
-sleep 2 && curl --socks5 127.0.0.1:7890 -I https://github.com 2>/dev/null | head -1
+    ```bash
+    # Step 1: 确认死亡
+    curl --socks5 127.0.0.1:7890 -I https://github.com
+    # 如果无输出或 "Connection refused"，进入 Step 2
 
-# Step 5: 重新推送
-cd ~/autodl-tmp/1KIMI && git push
-```
+    # Step 2: 清理僵尸进程（如果有）
+    pkill -f clash-meta 2>/dev/null
+
+    # Step 3: 重启
+    cd ~/clash
+    nohup ./clash-meta -f ~/.config/clash/config.yaml > clash.log 2>&1 &
+
+    # Step 4: 验证（等待2秒）
+    sleep 2 && curl --socks5 127.0.0.1:7890 -I https://github.com 2>/dev/null | head -1
+
+    # Step 5: 重新推送
+    cd ~/autodl-tmp/1KIMI && git push
+    ```
 
 ### 数据准备
 
