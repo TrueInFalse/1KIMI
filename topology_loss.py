@@ -20,13 +20,15 @@ class TopologicalRegularizer(nn.Module):
     Args:
         target_beta0: 目标连通分量数（默认5，经验值适合血管树）
         max_death: filtration域中最大death值（默认0.5）
+        loss_scale: 损失缩放因子（默认1.0，通过实验调整）
     """
     
-    def __init__(self, target_beta0: int = 5, max_death: float = 0.5):
+    def __init__(self, target_beta0: int = 5, max_death: float = 0.5, loss_scale: float = 1.0):
         super().__init__()
         self.target_beta0 = target_beta0
         self.max_death = max_death
-        print(f"[拓扑损失-经典版] target_beta0={target_beta0}, max_death={max_death}")
+        self.loss_scale = loss_scale
+        print(f"[拓扑损失-经典版] target_beta0={target_beta0}, max_death={max_death}, loss_scale={loss_scale}")
     
     def forward(
         self, 
@@ -104,7 +106,8 @@ class TopologicalRegularizer(nn.Module):
             
             losses.append(loss_i)
         
-        return torch.stack(losses).mean()
+        # 应用损失缩放
+        return torch.stack(losses).mean() * self.loss_scale
 
 
 # 向后兼容别名

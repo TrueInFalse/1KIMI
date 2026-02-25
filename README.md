@@ -459,3 +459,36 @@ loss = MSE(lifetimes, 0.5)
 
 **优势**: 简单稳定，无数值爆炸风险。
 
+
+### 2026-02-24: 添加loss_scale参数和早停统一开关
+
+**修改1: loss_scale参数**
+- `topology_loss.py`: 添加 `loss_scale` 参数（默认1.0）
+- `config.yaml`: 添加 `topology.loss_scale: 1.0`
+- `train_with_topology.py`: 传递loss_scale参数
+
+**实际损失值计算**（用于参考调整）:
+```
+Dice损失: ~0.88
+loss_scale=1.0: Topo=0.053, Ratio=6%
+loss_scale=5.0: Topo=0.27,  Ratio=30%
+loss_scale=10.0: Topo=0.53, Ratio=60%
+```
+
+**修改2: 早停统一开关**
+- `config.yaml`: 添加 `training.enable_early_stopping: true`
+- `train_baseline.py`: 根据开关启用/禁用早停
+- `train_with_topology.py`: 根据开关启用/禁用早停
+
+**使用方式**:
+```yaml
+# 启用早停（默认）
+training:
+  enable_early_stopping: true
+  patience: 20
+
+# 禁用早停（跑满max_epochs）
+training:
+  enable_early_stopping: false
+```
+

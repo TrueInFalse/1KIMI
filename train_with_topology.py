@@ -113,7 +113,8 @@ class TrainerWithTopology:
         topo_cfg = config.get('topology', {})
         self.criterion_topo = CubicalRipserLoss(
             target_beta0=topo_cfg.get('target_beta0', 5),
-            max_death=topo_cfg.get('max_death', 0.5)
+            max_death=topo_cfg.get('max_death', 0.5),
+            loss_scale=topo_cfg.get('loss_scale', 1.0)
         ).to(self.device)
         
         # λ调度器（修正版：前30固定0.1，后70线性增至0.5）
@@ -123,6 +124,17 @@ class TrainerWithTopology:
             lambda_start=0.1,
             lambda_end=0.5
         )
+        
+        # 早停机制（通过enable_early_stopping开关控制，与基线模型统一）
+        self.enable_early_stopping = config['training'].get('enable_early_stopping', True)
+        if self.enable_early_stopping:
+            from train_baseline import EarlyStopping
+            self.early_stopping = EarlyStopping(
+                patience=config['training']['patience'],
+                mode='max'
+            )
+        else:
+            self.early_stopping = None
         
         # 日志
         self.log_file = self.log_dir / 'training_topo_log.csv'
@@ -346,7 +358,13 @@ class TrainerWithTopology:
         max_epochs = self.config['training']['max_epochs']
         
         
-        print(f'\n开始训练 (cripser 0.0.25+ 经典稳定版)')
+        # 打印早停状态
+        if self.enable_early_stopping:
+            print(f'\n早停: 启用 (耐心值={self.config["training"]["patience"]})')
+        else:
+            print(f'\n早停: 禁用 (将跑满{max_epochs}轮)')
+        
+        print(f'开始训练 (cripser 0.0.25+ 经典稳定版)')
         print(f'总轮数: {max_epochs}')
         print(f'开始时间: {self.start_time.strftime("%Y-%m-%d %H:%M:%S")}')
         print('=' * 80)
@@ -405,6 +423,12 @@ class TrainerWithTopology:
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
                 }, self.checkpoint_dir / f'checkpoint_epoch_{self.current_epoch}.pth')
+            
+            # 早停检查（与基线模型统一开关）
+            if self.enable_early_stopping and self.early_stopping(val_dice, self.current_epoch):
+                print(f'\n早停触发！最佳epoch: {self.early_stopping.best_epoch}, '
+                      f'最佳val_dice: {self.early_stopping.best_value:.4f}')
+                break
         
         # 保存最终模型
         torch.save({

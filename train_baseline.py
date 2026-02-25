@@ -133,11 +133,15 @@ class Trainer:
         self._setup_model()
         self._setup_optimizer()
         
-        # 早停机制
-        self.early_stopping = EarlyStopping(
-            patience=config['training']['patience'],
-            mode='max'  # val_dice越大越好
-        )
+        # 早停机制（通过enable_early_stopping开关控制）
+        self.enable_early_stopping = config['training'].get('enable_early_stopping', True)
+        if self.enable_early_stopping:
+            self.early_stopping = EarlyStopping(
+                patience=config['training']['patience'],
+                mode='max'  # val_dice越大越好
+            )
+        else:
+            self.early_stopping = None
         
         # 日志
         self.log_file = self.log_dir / 'training_log.csv'
@@ -413,7 +417,10 @@ class Trainer:
         print(f'开始时间: {start_datetime}')
         print(f'设备: {self.device}')
         print(f'最大epoch: {max_epochs}')
-        print(f'早停耐心: {self.config["training"]["patience"]}（监控val_dice）')
+        if self.enable_early_stopping:
+            print(f'早停: 启用 (耐心值={self.config["training"]["patience"]})')
+        else:
+            print(f'早停: 禁用 (将跑满{max_epochs}轮)'
         print('=' * 80 + '\n')
         
         for epoch in range(1, max_epochs + 1):
@@ -456,8 +463,8 @@ class Trainer:
                 self.best_val_dice = val_dice
                 self.save_checkpoint(is_best=True)
             
-            # 早停检查（仅基于val_dice）
-            if self.early_stopping(val_dice, epoch):
+            # 早停检查（仅基于val_dice，可通过enable_early_stopping禁用）
+            if self.enable_early_stopping and self.early_stopping(val_dice, epoch):
                 print(f'\n早停触发！最佳epoch: {self.early_stopping.best_epoch}, '
                       f'最佳val_dice: {self.early_stopping.best_value:.4f}')
                 break
@@ -472,7 +479,8 @@ class Trainer:
         print(f'结束时间: {end_datetime}')
         print(f'总用时: {self.format_time(total_time)}')
         print(f'平均每轮: {self.format_time(np.mean(self.epoch_times))}')
-        print(f'最佳验证Dice: {self.best_val_dice:.4f} (Epoch {self.early_stopping.best_epoch})')
+        best_epoch_str = str(self.early_stopping.best_epoch) if self.early_stopping else 'N/A'
+        print(f'最佳验证Dice: {self.best_val_dice:.4f} (Epoch {best_epoch_str})')
         print(f'最佳模型: {self.checkpoint_dir / "best_model.pth"}')
         print('=' * 80)
 

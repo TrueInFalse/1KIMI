@@ -76,6 +76,13 @@ metrics:
 topology:
   target_beta0: 5          # 目标连通分量数（经典版固定5，适合血管树）
   max_death: 0.5           # filtration域中最大death值
+  loss_scale: 1.0          # 损失缩放因子（默认1.0，通过实验调整）
+                            # 调大：拓扑约束更强；调小：拓扑影响减弱
+
+# 早停设置（同时控制基线和拓扑模型）
+training:
+  enable_early_stopping: true  # true=启用早停，false=禁用早停（跑满max_epochs）
+  patience: 20                 # 早停耐心值（仅当enable_early_stopping=true时有效）
 
   # 课程学习策略（Curriculum Learning）：先训练CNN，再引入拓扑约束
   # 策略说明：
