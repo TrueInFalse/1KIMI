@@ -72,19 +72,10 @@ metrics:
   topology_threshold: 0.5   # 二值化阈值（计算拓扑指标用）。调高：分割更保守，可能减少假阳性，但增加断裂；
                             # 调低：分割更敏感，可能增加假阳性，但连通性更好。
 
-# 拓扑损失参数（Stage 2使用）- 稳定版v3.1
+# 拓扑损失参数（经典稳定版）
 topology:
-  target_beta0: 5          # 目标连通分量数（固定5，经验值适合血管树结构）
-                            # 经验：视网膜血管通常有4-6个主要连通区域
-  
-  max_death: 0.5           # filtration域中最大death值（对应prob=0.5）
-  
-  loss_scale: 10.0         # 损失缩放因子（默认10.0，稳定不爆炸）
-                            # 历史：300.0导致数值爆炸，10.0更稳定
-  
-  excess_weight: 0.3       # excess惩罚权重（惩罚过多连通分量）
-  short_weight: 0.7        # short持续惩罚权重（惩罚短持续组件）
-  short_threshold: 0.08    # 短持续阈值（lifetimes低于此值被惩罚）
+  target_beta0: 5          # 目标连通分量数（经典版固定5，适合血管树）
+  max_death: 0.5           # filtration域中最大death值
 
   # 课程学习策略（Curriculum Learning）：先训练CNN，再引入拓扑约束
   # 策略说明：

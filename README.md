@@ -437,3 +437,25 @@ loss_scale = 10.0                   # 从300降至10
 - target_beta0=5: 经验值，适合视网膜血管树结构（通常4-6个主要连通区域）
 - loss_scale=10.0: 历史300.0导致爆炸，10.0更稳定
 
+
+### 2026-02-24: 回归经典稳定拓扑损失
+
+**问题**: 新公式（excess+short）复杂且不稳定。
+
+**修改**:
+- `topology_loss.py`: 回归经典公式 - 保留前target_beta0个最长组件 + MSE到0.5
+- `config.yaml`: 简化拓扑参数，只保留target_beta0和max_death
+- `train_with_topology.py`: 简化初始化代码
+
+**经典公式**:
+```python
+# 保留前target_beta0个最长持续组件
+if len(lifetimes) > target_beta0:
+    lifetimes = topk(lifetimes, target_beta0)
+
+# MSE到目标lifetime=0.5
+loss = MSE(lifetimes, 0.5)
+```
+
+**优势**: 简单稳定，无数值爆炸风险。
+
