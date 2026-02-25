@@ -276,13 +276,24 @@ class KaggleCombinedDataset(Dataset):
         return image, mask
     
     def _augment(self, image: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """数据增强"""
+        """数据增强（添加随机旋转-15°~+15°）"""
+        # 水平翻转
         if random.random() > 0.5:
             image = TF.hflip(image)
             mask = TF.hflip(mask)
+        
+        # 垂直翻转
         if random.random() > 0.5:
             image = TF.vflip(image)
             mask = TF.vflip(mask)
+        
+        # 随机旋转 -15°~+15°（同时旋转image和mask）
+        if random.random() > 0.5:
+            angle = random.uniform(-15, 15)
+            image = TF.rotate(image, angle, fill=0)
+            # mask使用NEAREST插值保持二值性
+            mask = TF.rotate(mask, angle, fill=0, interpolation=TF.InterpolationMode.NEAREST)
+        
         return image, mask
 
 

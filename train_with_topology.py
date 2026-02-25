@@ -109,10 +109,15 @@ class TrainerWithTopology:
         
         # 损失函数
         self.criterion_dice = smp.losses.DiceLoss(mode='binary', from_logits=True)
-        # 使用真正的TopologicalRegularizer（cripser 0.0.25+原生版）
+        # 拓扑损失（支持自适应target_beta0）
+        topo_cfg = config.get('topology', {})
         self.criterion_topo = CubicalRipserLoss(
-            target_beta0=config.get('topology', {}).get('target_beta0', 12),
-            max_death=0.5
+            target_beta0=topo_cfg.get('target_beta0'),  # None表示自动计算
+            max_death=topo_cfg.get('max_death', 0.5),
+            loss_scale=topo_cfg.get('loss_scale', 300.0),
+            excess_weight=topo_cfg.get('excess_weight', 0.3),
+            short_weight=topo_cfg.get('short_weight', 0.7),
+            short_threshold=topo_cfg.get('short_threshold', 0.08)
         ).to(self.device)
         
         # λ调度器（修正版：前30固定0.1，后70线性增至0.5）
@@ -344,6 +349,23 @@ class TrainerWithTopology:
         self.start_time = datetime.now()
         max_epochs = self.config['training']['max_epochs']
         
+        
+        # 如果需要，从训练集计算target_beta0
+        if hasattr(self.criterion_topo, '_auto_compute_beta0') and self.criterion_topo._auto_compute_beta0:
+            print("\n[拓扑损失] 从训练集金标计算target_beta0...")
+            target_beta0 = self.criterion_topo.compute_target_beta0_from_loader(train_loader)
+            self.criterion_topo.target_beta0 = target_beta0
+            self.criterion_topo._auto_compute_beta0 = False
+            print(f"[拓扑损失] 设置target_beta0 = {target_beta0}")
+        
+        # 打印拓扑损失配置
+        topo_stats = self.criterion_topo.get_stats()
+        print(f"\n[拓扑损失配置]")
+        print(f"  target_beta0: {topo_stats['target_beta0']}")
+        print(f"  loss_scale: {topo_stats['loss_scale']}")
+        print(f"  excess_weight: {topo_stats['excess_weight']}")
+        print(f"  short_weight: {topo_stats['short_weight']}")
+        print(f"  short_threshold: {topo_stats['short_threshold']}")
         print(f'\\n开始训练 (cripser 0.0.25+ 真正可微分版)')
         print(f'总轮数: {max_epochs}')
         print(f'开始时间: {self.start_time.strftime("%Y-%m-%d %H:%M:%S")}')
