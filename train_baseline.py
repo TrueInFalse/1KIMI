@@ -39,7 +39,7 @@ import yaml
 from tqdm import tqdm
 import segmentation_models_pytorch as smp
 
-from data_drive import get_drive_loaders
+from data_combined import get_combined_loaders
 from model_unet import get_unet_model, count_parameters
 from utils_metrics import (
     compute_basic_metrics, 
@@ -360,7 +360,7 @@ class Trainer:
             'scheduler_state_dict': self.scheduler.state_dict(),
             'best_val_dice': self.best_val_dice,
             'config': {
-                'in_channels': self.config['data']['in_channels'],
+                'in_channels': 3,  # 统一RGB 3通道
                 'encoder': self.config['model']['encoder'],
                 'img_size': self.config['data']['img_size']
             }
@@ -509,9 +509,10 @@ def main(config_path: str = 'config.yaml') -> None:
         print('CUDA不可用，切换到CPU')
         device = 'cpu'
     
-    # 数据加载
+    # 数据加载（双模式：纯DRIVE / Kaggle联合）
+    print(f"当前数据模式: {'Kaggle联合' if config['data']['use_kaggle_combined'] else '纯DRIVE'}")
     print('加载数据...')
-    train_loader, val_loader, _ = get_drive_loaders(config_path)
+    train_loader, val_loader, _ = get_combined_loaders(config)
     
     # 创建训练器
     trainer = Trainer(config, device)
