@@ -48,33 +48,44 @@ from topology_loss import CubicalRipserLoss
 
 class LambdaScheduler:
     """
-    λ课程学习调度器（修正版）
+    λ课程学习调度器（015策略）
     
-    策略：前30 epoch固定0.1，后70 epoch线性增至0.5
+    策略：
+    - 前30% epochs: λ=0（纯Dice训练）
+    - 中间30% epochs: λ从0线性增长到0.1
+    - 最后40% epochs: λ从0.1线性增长到0.5
     """
     
     def __init__(
         self,
-        warmup_epochs: int = 30,      # 前30轮固定
-        ramp_epochs: int = 70,         # 后70轮线性增长
-        lambda_start: float = 0.1,     # 起始λ
-        lambda_end: float = 0.5        # 最终λ
+        max_epochs: int = 200,
+        phase1_ratio: float = 0.3,     # 前30%
+        phase2_ratio: float = 0.3,     # 中间30%
+        phase3_ratio: float = 0.4      # 最后40%
     ):
-        self.warmup = warmup_epochs
-        self.ramp = ramp_epochs
-        self.lambda_start = lambda_start
-        self.lambda_end = lambda_end
+        self.max_epochs = max_epochs
+        self.phase1_epochs = int(max_epochs * phase1_ratio)
+        self.phase2_epochs = int(max_epochs * phase2_ratio)
+        self.phase3_epochs = max_epochs - self.phase1_epochs - self.phase2_epochs
+        
+        print(f"[015策略] 总轮数{max_epochs}: "
+              f"阶段1(λ=0)={self.phase1_epochs}轮, "
+              f"阶段2(0→0.1)={self.phase2_epochs}轮, "
+              f"阶段3(0.1→0.5)={self.phase3_epochs}轮")
     
     def get_lambda(self, epoch: int) -> float:
-        """获取当前epoch的λ值。"""
-        if epoch < self.warmup:
-            return self.lambda_start
-        elif epoch < self.warmup + self.ramp:
-            # 线性插值
-            progress = (epoch - self.warmup) / self.ramp
-            return self.lambda_start + progress * (self.lambda_end - self.lambda_start)
+        """获取当前epoch的λ值（015策略）。"""
+        if epoch < self.phase1_epochs:
+            # 阶段1: λ=0
+            return 0.0
+        elif epoch < self.phase1_epochs + self.phase2_epochs:
+            # 阶段2: 从0线性增长到0.1
+            progress = (epoch - self.phase1_epochs) / self.phase2_epochs
+            return 0.0 + progress * 0.1
         else:
-            return self.lambda_end
+            # 阶段3: 从0.1线性增长到0.5
+            progress = (epoch - self.phase1_epochs - self.phase2_epochs) / self.phase3_epochs
+            return 0.1 + progress * 0.4
 
 
 class TrainerWithTopology:
@@ -117,13 +128,9 @@ class TrainerWithTopology:
             loss_scale=topo_cfg.get('loss_scale', 1.0)
         ).to(self.device)
         
-        # λ调度器（修正版：前30固定0.1，后70线性增至0.5）
-        self.lambda_scheduler = LambdaScheduler(
-            warmup_epochs=30,
-            ramp_epochs=70,
-            lambda_start=0.1,
-            lambda_end=0.5
-        )
+        # λ调度器（015策略：前30%λ=0，中间30%0→0.1，最后40%0.1→0.5）
+        max_epochs = config['training']['max_epochs']
+        self.lambda_scheduler = LambdaScheduler(max_epochs=max_epochs)
         
         # 早停机制（通过enable_early_stopping开关控制，与基线模型统一）
         self.enable_early_stopping = config['training'].get('enable_early_stopping', True)
@@ -393,7 +400,7 @@ class TrainerWithTopology:
             
             # 打印日志（美观格式，类似train_baseline.py）
             print(f'\nEpoch {self.current_epoch}/{max_epochs}  (λ={current_lambda:.3f})')
-            print(f'  Train Loss: {train_loss:.4f} | Train Dice: {train_dice:.4f} | Train Topo: {train_loss_topo:.4f}')
+            print(f'  Train Loss: {train_loss:.4f} | Train Dice: {train_dice:.4f} | Train Topo: {train_loss_topo:.4f} (含loss_scale)')
             print(f'  Val Dice: {val_dice:.4f} | Val IoU: {val_metrics["iou"]:.4f} | Val Prec: {val_metrics["precision"]:.4f} | Val Rec: {val_metrics["recall"]:.4f}')
             print(f'  CL-Break: {val_metrics.get("cl_break", 0):.1f} | Δβ₀: {val_metrics.get("delta_beta0", 0):.1f}')
             print(f'  Each Time: {self.format_time(epoch_time)} | Total Time: {self.format_time(elapsed)} | ETA: {self.format_time(eta)} | LR: {current_lr:.6f}')
