@@ -42,7 +42,7 @@ training:
   max_epochs: 200        # 最大训练轮数。调大：有机会更好，但可能过拟合；调小：可能欠拟合。
   patience: 20           # 早停耐心值（监控val_dice）。调大：允许更多轮无改善，可能避免早停，但延长训练。
                          # 调小：更早停止，防止过拟合，但可能错过后续提升。
-  enable_early_stopping: true  # true=启用早停，false=禁用早停（跑满max_epochs）
+  enable_early_stopping: false  # true=启用早停，false=禁用早停（跑满max_epochs）
   device: cuda
   seed: 42               # 随机种子。固定后可复现结果。
 
@@ -77,7 +77,7 @@ metrics:
 topology:
   target_beta0: 5          # 目标连通分量数（经典版固定5，适合血管树）
   max_death: 0.5           # filtration域中最大death值
-  loss_scale: 1.0          # 损失缩放因子（默认1.0，通过实验调整）
+  loss_scale: 100.0          # 损失缩放因子（默认1.0，通过实验调整）
                             # 调大：拓扑约束更强；调小：拓扑影响减弱
 
 # 课程学习策略（Curriculum Learning）：先训练CNN，再引入拓扑约束
