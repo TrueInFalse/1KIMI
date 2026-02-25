@@ -350,14 +350,6 @@ class TrainerWithTopology:
         max_epochs = self.config['training']['max_epochs']
         
         
-        # 如果需要，从训练集计算target_beta0
-        if hasattr(self.criterion_topo, '_auto_compute_beta0') and self.criterion_topo._auto_compute_beta0:
-            print("\n[拓扑损失] 从训练集金标计算target_beta0...")
-            target_beta0 = self.criterion_topo.compute_target_beta0_from_loader(train_loader)
-            self.criterion_topo.target_beta0 = target_beta0
-            self.criterion_topo._auto_compute_beta0 = False
-            print(f"[拓扑损失] 设置target_beta0 = {target_beta0}")
-        
         # 打印拓扑损失配置
         topo_stats = self.criterion_topo.get_stats()
         print(f"\n[拓扑损失配置]")
