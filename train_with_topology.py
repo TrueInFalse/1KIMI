@@ -137,20 +137,15 @@ class TrainerWithTopology:
         print(f'拓扑损失: CubicalRipserLoss (cripser 0.0.25+ 真正可微分)')
     
     def _setup_model(self) -> None:
-        """初始化模型。"""
+        """初始化模型（统一RGB 3通道）。"""
         model_cfg = self.config['model']
-        data_cfg = self.config['data']
         
-        # 根据数据模式自动选择输入通道
-        # Kaggle联合数据集使用RGB(3通道)，DRIVE使用灰度(1通道)
-        use_kaggle = data_cfg.get('use_kaggle_combined', False)
-        in_channels = 3 if use_kaggle else data_cfg.get('in_channels', 1)
-        
-        if use_kaggle:
-            print(f'注意: Kaggle联合模式使用RGB 3通道输入')
+        # 统一使用RGB 3通道（适配ImageNet预训练权重）
+        self.in_channels = 3
+        print('注意: 统一使用RGB 3通道输入（适配ImageNet预训练）')
         
         self.model = get_unet_model(
-            in_channels=in_channels,
+            in_channels=3,
             encoder=model_cfg['encoder'],
             pretrained=model_cfg['pretrained'],
             activation=model_cfg.get('activation', None)

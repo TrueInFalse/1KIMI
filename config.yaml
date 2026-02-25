@@ -25,8 +25,8 @@ data:
                          # 调大：增加细节，但内存消耗增加，可能需减小batch_size。
                          # 调小：减少计算量，但可能丢失细微血管，影响分割精度。
 
-  in_channels: 1         # 输入通道数: 1=仅绿色通道, 3=RGB
-                         # 绿色通道对血管对比度最好，常用1。改为3则用彩色，可能引入冗余信息。
+  # in_channels: 3      # 已统一为RGB 3通道（见data_drive.py和train_with_topology.py）
+                         # 所有数据集（DRIVE和Kaggle）统一输出RGB [3,H,W]
 
   # 数据增强参数 (Stage 0仅使用最基础的增强)
   augmentation:
@@ -56,7 +56,7 @@ training:
 # 模型参数 (Stage 1使用)
 model:
   name: unet
-  encoder: resnet34      # 编码器（与in_channels=1兼容）。不同encoder参数量不同，影响拟合能力。
+  encoder: resnet34      # 编码器（统一使用RGB 3通道输入，适配ImageNet预训练权重）
   pretrained: true       # ImageNet预训练权重。true加快收敛，提升性能，但需适配单通道。
   encoder_weights: imagenet
   activation: null       # 输出logits，不激活（smp.losses.DiceLoss会自动sigmoid）

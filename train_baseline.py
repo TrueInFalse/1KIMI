@@ -153,12 +153,13 @@ class Trainer:
         self.epoch_times = []
     
     def _setup_model(self) -> None:
-        """初始化模型。"""
+        """初始化模型（统一RGB 3通道）。"""
         model_cfg = self.config['model']
-        data_cfg = self.config['data']
+        
+        print('注意: 统一使用RGB 3通道输入（适配ImageNet预训练）')
         
         self.model = get_unet_model(
-            in_channels=data_cfg['in_channels'],
+            in_channels=3,
             encoder=model_cfg['encoder'],
             pretrained=model_cfg['pretrained'],
             activation=model_cfg.get('activation', None)

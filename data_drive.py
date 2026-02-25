@@ -33,18 +33,17 @@ import yaml
 
 
 class DRIVEDataset(Dataset):
-    """DRIVE视网膜血管分割数据集。
+    """DRIVE视网膜血管分割数据集（统一RGB 3通道版）。
     
     关键特性:
     - 严格区分1st_manual（血管标签）和mask（ROI）
     - 16+4划分策略：21-36训练，37-40验证
-    - 数值验证确保加载正确标签（血管占~10%，ROI占~50%）
+    - 统一输出RGB 3通道（适配ImageNet预训练权重）
     
     Args:
         root: DRIVE数据集根目录
         image_ids: 图像ID列表
         img_size: 输出图像尺寸
-        in_channels: 输入通道数（1=绿色通道，3=RGB）
         is_training: 是否为训练模式（启用数据增强）
     """
     
@@ -53,13 +52,11 @@ class DRIVEDataset(Dataset):
         root: Union[str, Path],
         image_ids: List[int],
         img_size: int = 256,
-        in_channels: int = 1,
         is_training: bool = True
     ) -> None:
         self.root = Path(root)
         self.image_ids = image_ids
         self.img_size = img_size
-        self.in_channels = in_channels
         self.is_training = is_training
         
         # 数据集模式推断（training/test）
@@ -173,31 +170,26 @@ class DRIVEDataset(Dataset):
         return image, vessel_mask, roi_mask
     
     def _load_image(self, path: Path) -> torch.Tensor:
-        """加载并预处理图像。
+        """加载并预处理图像（统一输出RGB 3通道）。
         
         Args:
             path: 图像文件路径
             
         Returns:
-            预处理后的图像张量 [C, H, W]
+            预处理后的图像张量 [3, H, W]
         """
         # 使用PIL加载图像
         img = Image.open(path)
         img_array = np.array(img)  # [H, W, C] 或 [H, W]
         
-        # 转换为张量并归一化到[0, 1]
+        # 转换为张量并归一化到[0, 1]，统一输出RGB 3通道
         if len(img_array.shape) == 3:
-            # 彩色图像
-            if self.in_channels == 1:
-                # 仅使用绿色通道（视网膜血管最清晰）
-                img_tensor = torch.from_numpy(img_array[:, :, 1]).float() / 255.0
-                img_tensor = img_tensor.unsqueeze(0)  # [1, H, W]
-            else:
-                # 使用RGB三通道
-                img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).float() / 255.0
+            # 彩色图像 -> RGB [3, H, W]
+            img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).float() / 255.0
         else:
-            # 灰度图像
-            img_tensor = torch.from_numpy(img_array).unsqueeze(0).float() / 255.0
+            # 灰度图像 -> 复制为3通道 [3, H, W]
+            img_gray = torch.from_numpy(img_array).float() / 255.0
+            img_tensor = img_gray.unsqueeze(0).repeat(3, 1, 1)  # [1, H, W] -> [3, H, W]
         
         # resize到目标尺寸
         img_tensor = torch.nn.functional.interpolate(
@@ -314,7 +306,6 @@ def get_drive_loaders(
         root=data_cfg['root'],
         image_ids=data_cfg['train_ids'],
         img_size=data_cfg['img_size'],
-        in_channels=data_cfg['in_channels'],
         is_training=True
     )
     
@@ -322,7 +313,6 @@ def get_drive_loaders(
         root=data_cfg['root'],
         image_ids=data_cfg['val_ids'],
         img_size=data_cfg['img_size'],
-        in_channels=data_cfg['in_channels'],
         is_training=False
     )
     
@@ -352,7 +342,6 @@ def get_drive_loaders(
             root=data_cfg['root'],
             image_ids=data_cfg['test_ids'],
             img_size=data_cfg['img_size'],
-            in_channels=data_cfg['in_channels'],
             is_training=False
         )
         test_loader = DataLoader(
@@ -378,8 +367,7 @@ if __name__ == '__main__':
     dataset = DRIVEDataset(
         root='./DRIVE',
         image_ids=[21, 22, 23],
-        img_size=256,
-        in_channels=1
+        img_size=256
     )
     print(f'数据集大小: {len(dataset)}')
     
