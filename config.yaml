@@ -42,6 +42,7 @@ training:
   max_epochs: 200        # 最大训练轮数。调大：有机会更好，但可能过拟合；调小：可能欠拟合。
   patience: 20           # 早停耐心值（监控val_dice）。调大：允许更多轮无改善，可能避免早停，但延长训练。
                          # 调小：更早停止，防止过拟合，但可能错过后续提升。
+  enable_early_stopping: true  # true=启用早停，false=禁用早停（跑满max_epochs）
   device: cuda
   seed: 42               # 随机种子。固定后可复现结果。
 
@@ -79,12 +80,7 @@ topology:
   loss_scale: 1.0          # 损失缩放因子（默认1.0，通过实验调整）
                             # 调大：拓扑约束更强；调小：拓扑影响减弱
 
-# 早停设置（同时控制基线和拓扑模型）
-training:
-  enable_early_stopping: true  # true=启用早停，false=禁用早停（跑满max_epochs）
-  patience: 20                 # 早停耐心值（仅当enable_early_stopping=true时有效）
-
-  # 课程学习策略（Curriculum Learning）：先训练CNN，再引入拓扑约束
+# 课程学习策略（Curriculum Learning）：先训练CNN，再引入拓扑约束
   # 策略说明：
   # - 阶段1: 先纯Dice训练50轮，建立基础像素精度（CNN预热）
   # - 阶段2: λ=0.05训练50轮，轻度拓扑微调（引入拓扑概念）

@@ -420,7 +420,7 @@ class Trainer:
         if self.enable_early_stopping:
             print(f'早停: 启用 (耐心值={self.config["training"]["patience"]})')
         else:
-            print(f'早停: 禁用 (将跑满{max_epochs}轮)'
+            print(f'早停: 禁用 (将跑满{max_epochs}轮)')
         print('=' * 80 + '\n')
         
         for epoch in range(1, max_epochs + 1):
