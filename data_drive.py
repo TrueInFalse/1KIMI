@@ -30,6 +30,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import yaml
+import torchvision.transforms as T
 
 
 class DRIVEDataset(Dataset):
@@ -58,6 +59,9 @@ class DRIVEDataset(Dataset):
         self.image_ids = image_ids
         self.img_size = img_size
         self.is_training = is_training
+        
+        # 归一化（与Kaggle联合数据集统一）
+        self.normalize = T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         
         # 数据集模式推断（training/test）
         if min(image_ids) >= 21:
@@ -182,7 +186,7 @@ class DRIVEDataset(Dataset):
         img = Image.open(path)
         img_array = np.array(img)  # [H, W, C] 或 [H, W]
         
-        # 转换为张量并归一化到[0, 1]，统一输出RGB 3通道
+        # 转换为张量并归一化，统一输出RGB 3通道
         if len(img_array.shape) == 3:
             # 彩色图像 -> RGB [3, H, W]
             img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).float() / 255.0
@@ -190,6 +194,9 @@ class DRIVEDataset(Dataset):
             # 灰度图像 -> 复制为3通道 [3, H, W]
             img_gray = torch.from_numpy(img_array).float() / 255.0
             img_tensor = img_gray.unsqueeze(0).repeat(3, 1, 1)  # [1, H, W] -> [3, H, W]
+        
+        # 应用与Kaggle联合数据集相同的归一化
+        img_tensor = self.normalize(img_tensor)
         
         # resize到目标尺寸
         img_tensor = torch.nn.functional.interpolate(

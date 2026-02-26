@@ -209,10 +209,40 @@ class KaggleCombinedDataset(Dataset):
         if self.augmentation:
             image, mask = self._augment(image, mask)
         
-        # ROI mask [1, H, W]（关键修复！）
-        roi_mask = torch.ones(1, image.shape[1], image.shape[2]).float()
+        # ROI mask [1, H, W] - 生成眼底圆形FOV mask
+        roi_mask = self._create_fov_mask(image.shape[1], image.shape[2])
         
         return image, mask, roi_mask
+    
+    def _create_fov_mask(self, h: int, w: int) -> torch.Tensor:
+        """创建眼底圆形FOV mask。
+        
+        模拟DRIVE的圆形视野掩码，中心圆内的像素为1，外部为0。
+        
+        Args:
+            h: 图像高度
+            w: 图像宽度
+            
+        Returns:
+            roi_mask: [1, h, w] 圆形FOV mask
+        """
+        # 创建坐标网格
+        y = torch.arange(h).float()
+        x = torch.arange(w).float()
+        yy, xx = torch.meshgrid(y, x, indexing='ij')
+        
+        # 计算中心点和半径
+        center_y, center_x = h // 2, w // 2
+        # 半径略小于图像尺寸（留边距），模拟实际眼底图像的圆形FOV
+        radius = min(h, w) * 0.45  # 使用90%的短边作为直径
+        
+        # 计算每个像素到中心的距离
+        dist = torch.sqrt((yy - center_y) ** 2 + (xx - center_x) ** 2)
+        
+        # 圆形mask：距离小于半径的为1（前景），否则为0
+        mask = (dist < radius).float()
+        
+        return mask.unsqueeze(0)  # [1, h, w]
     
     def _find_mask(self, img_path: Path) -> Optional[Path]:
         """

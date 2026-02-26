@@ -33,16 +33,16 @@ import yaml
 def load_local_resnet34_weights(
     model: nn.Module,
     weights_path: str = './pretrained_weights/resnet34-333f7ec4.pth',
-    in_channels: int = 1
+    in_channels: int = 3
 ) -> None:
     """加载本地ResNet34预训练权重。
     
-    处理1通道输入的情况：将3通道权重平均到1通道。
+    打印详细的权重匹配统计信息。
     
     Args:
         model: smp.Unet模型
         weights_path: 本地权重文件路径
-        in_channels: 输入通道数
+        in_channels: 输入通道数（当前统一为3）
     """
     weights_path = Path(weights_path)
     
@@ -57,28 +57,66 @@ def load_local_resnet34_weights(
     # 获取模型编码器的state_dict
     encoder_state = model.encoder.state_dict()
     
-    # 过滤并转换权重
-    # torchvision的ResNet34与smp的encoder名称可能不同，需要映射
-    loaded_layers = 0
+    # 统计信息
+    matched_layers = []
+    mismatched_layers = []
+    skipped_fc = []
+    missing_in_model = []
+    missing_in_ckpt = []
+    
+    # 分析所有checkpoint中的权重
     for name, param in state_dict.items():
         # 跳过全连接层（分类头）
         if 'fc' in name:
+            skipped_fc.append(name)
             continue
         
-        # 处理第一层卷积（conv1）的通道数不匹配
-        if name == 'conv1.weight' and in_channels == 1:
-            # 将3通道权重平均到1通道: [64, 3, 7, 7] -> [64, 1, 7, 7]
-            param = param.mean(dim=1, keepdim=True)
-        
-        # smp的encoder通常使用resnet34.encoder.conv1的命名
-        # 需要将torchvision的命名转换为smp的命名
-        encoder_name = name
-        if encoder_name in encoder_state:
-            if encoder_state[encoder_name].shape == param.shape:
-                encoder_state[encoder_name].copy_(param)
-                loaded_layers += 1
+        if name in encoder_state:
+            if encoder_state[name].shape == param.shape:
+                matched_layers.append((name, param.shape))
+            else:
+                mismatched_layers.append((name, param.shape, encoder_state[name].shape))
+        else:
+            missing_in_model.append(name)
     
-    print(f'成功加载 {loaded_layers} 层本地预训练权重')
+    # 检查模型中有但checkpoint中没有的层
+    ckpt_keys = set(k for k in state_dict.keys() if 'fc' not in k)
+    model_keys = set(encoder_state.keys())
+    for name in model_keys - ckpt_keys:
+        missing_in_ckpt.append(name)
+    
+    # 打印统计信息
+    print(f'\n{"="*60}')
+    print(f'[预训练权重加载报告] {weights_path.name}')
+    print(f'{"="*60}')
+    print(f'模型encoder层数: {len(encoder_state)}')
+    print(f'Checkpoint层数: {len(state_dict)} (含{len(skipped_fc)}层FC被跳过)')
+    print(f'✅ 匹配并成功加载: {len(matched_layers)} 层')
+    
+    if mismatched_layers:
+        print(f'⚠️  形状不匹配跳过: {len(mismatched_layers)} 层')
+        for name, ckpt_shape, model_shape in mismatched_layers[:3]:
+            print(f'   - {name}: checkpoint{list(ckpt_shape)} vs model{list(model_shape)}')
+    
+    if missing_in_model:
+        print(f'⚠️  Checkpoint中有但模型中无: {len(missing_in_model)} 层')
+        for name in missing_in_model[:3]:
+            print(f'   - {name}')
+    
+    if missing_in_ckpt:
+        print(f'⚠️  模型中有但Checkpoint中无: {len(missing_in_ckpt)} 层')
+        for name in missing_in_ckpt[:3]:
+            print(f'   - {name}')
+    
+    # 执行加载
+    for name, param in state_dict.items():
+        if 'fc' in name:
+            continue
+        if name in encoder_state and encoder_state[name].shape == param.shape:
+            encoder_state[name].copy_(param)
+    
+    print(f'[结论] 成功加载 {len(matched_layers)}/{len(encoder_state)} 层预训练权重')
+    print(f'{"="*60}\n')
 
 
 def get_unet_model(

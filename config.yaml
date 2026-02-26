@@ -46,13 +46,9 @@ training:
   device: cuda
   seed: 42               # 随机种子。固定后可复现结果。
 
-  # 检查点设置
+  # 检查点与日志设置
   checkpoint_dir: ./checkpoints
-  save_best_only: true   # 仅保存最佳模型。若false会保存所有，占用磁盘。
-
-  # 日志设置
   log_dir: ./logs
-  log_csv: true          # 保存CSV日志。
 
 # 模型参数 (Stage 1使用)
 model:
