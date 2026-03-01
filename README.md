@@ -245,6 +245,21 @@ target_roi = target[roi_mask > 0]
 
 后续新增策略时，只需在代码中新增策略分支并在配置中追加参数，不必覆盖旧策略。
 
+### 7. Kaggle模式FOV ROI（基于图像内容估计）
+
+Kaggle联合数据集模式下，ROI不再使用固定居中圆或全1，而是按每张图像估计：
+
+1. 阈值分离非黑区域
+2. 取最大连通域
+3. 提取边界并拟合椭圆参数
+4. 生成与训练输入同尺寸的ROI mask
+
+配置位于 `config.yaml -> data.kaggle_roi`：
+- `mode: fov`：启用内容估计FOV（默认）
+- `mode: ones`：全1 ROI（仅用于对照实验）
+
+可运行 `python roi_audit_kaggle.py` 产出抽样overlay、面积统计、异常样本和同checkpoint的FOV/ones对照评估。
+
 ## 性能基准
 
 | 指标 | Stage 1基线 | Stage 2目标（+PH Loss） |

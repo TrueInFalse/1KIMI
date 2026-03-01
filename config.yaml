@@ -34,6 +34,12 @@ data:
     rotation_range: 0        # 暂不启用旋转。若开启可提升旋转不变性，但需注意血管方向性可能受影响。
     brightness_range: 0.0    # 暂不启用亮度调整。若开启可增强亮度鲁棒性，但可能改变对比度影响分割。
 
+  # Kaggle联合数据集ROI配置（仅在use_kaggle_combined=true时生效）
+  kaggle_roi:
+    mode: fov                # fov=基于图像内容估计FOV；ones=全1（用于对照评估）
+    threshold: 8             # 非黑像素阈值（0-255）
+    padding_scale: 1.03      # 拟合椭圆外扩系数（>1更保守）
+
 # 训练参数 (Stage 1使用)
 training:
   batch_size: 4          # 批次大小。调大：梯度估计更准，收敛更稳定，但显存需求大；调小：可能震荡，需降低学习率。
