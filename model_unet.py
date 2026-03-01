@@ -179,20 +179,20 @@ def load_model(
     Returns:
         model: 加载权重后的模型
     """
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # 尝试从checkpoint获取配置
     if 'config' in checkpoint:
         config = checkpoint['config']
         model = get_unet_model(
-            in_channels=config.get('in_channels', 1),
+            in_channels=config.get('in_channels', 3),
             encoder=config.get('encoder', 'resnet34'),
             pretrained=False,  # 加载权重时不需要预训练
             local_weights_path=local_weights_path
         )
     else:
         # 使用默认配置
-        model = get_unet_model(in_channels=1, pretrained=False, local_weights_path=local_weights_path)
+        model = get_unet_model(in_channels=3, pretrained=False, local_weights_path=local_weights_path)
     
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)

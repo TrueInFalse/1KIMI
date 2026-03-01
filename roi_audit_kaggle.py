@@ -25,7 +25,26 @@ from utils_metrics import compute_all_metrics, tensor_to_numpy
 
 def _overlay(image: np.ndarray, roi: np.ndarray, out_path: Path) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(5, 5))
-    img = np.clip((image.transpose(1, 2, 0) * 0.5 + 0.5), 0, 1)
+    
+    # 处理不同维度的输入
+    if image.ndim == 3:
+        # (C, H, W) -> (H, W, C)
+        if image.shape[0] in [1, 3]:
+            img = image.transpose(1, 2, 0)
+        else:
+            img = image
+        # 反归一化 (假设归一化是 (x - 0.5) / 0.5 )
+        img = np.clip((img * 0.5 + 0.5), 0, 1)
+        # 如果是单通道，复制为3通道
+        if img.shape[2] == 1:
+            img = np.repeat(img, 3, axis=2)
+    elif image.ndim == 2:
+        # (H, W) 灰度图
+        img = np.clip((image * 0.5 + 0.5), 0, 1)
+        img = np.stack([img] * 3, axis=2)
+    else:
+        raise ValueError(f"Unsupported image shape: {image.shape}")
+    
     ax.imshow(img)
     ax.imshow(roi, cmap='jet', alpha=0.28)
     ax.axis('off')
