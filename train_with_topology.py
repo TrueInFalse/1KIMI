@@ -47,45 +47,88 @@ from topology_loss import CubicalRipserLoss
 
 
 class LambdaScheduler:
-    """
-    λ课程学习调度器（015策略）
-    
-    策略：
-    - 前30% epochs: λ=0（纯Dice训练）
-    - 中间30% epochs: λ从0线性增长到0.1
-    - 最后40% epochs: λ从0.1线性增长到0.5
+    """λ课程学习调度器（支持多策略可扩展）。
+
+    当前内置策略:
+    - ``015``:
+      前30% epochs λ=0，接着30%线性0→0.1，最后40%线性0.1→0.5。
+    - ``3175``:
+      前30epoch固定0.1，后70epoch线性增至0.5，剩余epoch恒定0.5。
     """
     
     def __init__(
         self,
         max_epochs: int = 200,
-        phase1_ratio: float = 0.3,     # 前30%
-        phase2_ratio: float = 0.3,     # 中间30%
-        phase3_ratio: float = 0.4      # 最后40%
+        strategy: str = '015',
+        phase1_ratio: float = 0.3,
+        phase2_ratio: float = 0.3,
+        phase2_end_lambda: float = 0.1,
+        phase3_end_lambda: float = 0.5,
+        warmup_epochs: int = 30,
+        ramp_epochs: int = 70,
+        warmup_lambda: float = 0.1,
+        final_lambda: float = 0.5
     ):
         self.max_epochs = max_epochs
+        self.strategy = strategy.lower()
+
+        # 015策略参数
         self.phase1_epochs = int(max_epochs * phase1_ratio)
         self.phase2_epochs = int(max_epochs * phase2_ratio)
-        self.phase3_epochs = max_epochs - self.phase1_epochs - self.phase2_epochs
-        
-        print(f"[015策略] 总轮数{max_epochs}: "
-              f"阶段1(λ=0)={self.phase1_epochs}轮, "
-              f"阶段2(0→0.1)={self.phase2_epochs}轮, "
-              f"阶段3(0.1→0.5)={self.phase3_epochs}轮")
+        self.phase3_epochs = max(1, max_epochs - self.phase1_epochs - self.phase2_epochs)
+        self.phase2_end_lambda = phase2_end_lambda
+        self.phase3_end_lambda = phase3_end_lambda
+
+        # 3175策略参数
+        self.warmup_epochs = warmup_epochs
+        self.ramp_epochs = max(1, ramp_epochs)
+        self.warmup_lambda = warmup_lambda
+        self.final_lambda = final_lambda
+
+        self._print_schedule_info()
+
+    def _print_schedule_info(self) -> None:
+        """打印当前调度策略摘要。"""
+        if self.strategy == '015':
+            print(
+                f"[λ策略:015] 总轮数{self.max_epochs}: "
+                f"阶段1(λ=0)={self.phase1_epochs}轮, "
+                f"阶段2(0→{self.phase2_end_lambda})={self.phase2_epochs}轮, "
+                f"阶段3({self.phase2_end_lambda}→{self.phase3_end_lambda})={self.phase3_epochs}轮"
+            )
+        elif self.strategy == '3175':
+            hold_epochs = max(0, self.max_epochs - self.warmup_epochs - self.ramp_epochs)
+            print(
+                f"[λ策略:3175] 总轮数{self.max_epochs}: "
+                f"阶段1(固定{self.warmup_lambda})={self.warmup_epochs}轮, "
+                f"阶段2(线性{self.warmup_lambda}→{self.final_lambda})={self.ramp_epochs}轮, "
+                f"阶段3(固定{self.final_lambda})={hold_epochs}轮"
+            )
+        else:
+            raise ValueError(
+                f"不支持的lambda策略: {self.strategy}。"
+                f"可选: '015', '3175'"
+            )
     
     def get_lambda(self, epoch: int) -> float:
-        """获取当前epoch的λ值（015策略）。"""
-        if epoch < self.phase1_epochs:
-            # 阶段1: λ=0
-            return 0.0
-        elif epoch < self.phase1_epochs + self.phase2_epochs:
-            # 阶段2: 从0线性增长到0.1
-            progress = (epoch - self.phase1_epochs) / self.phase2_epochs
-            return 0.0 + progress * 0.1
-        else:
-            # 阶段3: 从0.1线性增长到0.5
+        """获取当前epoch的λ值。"""
+        if self.strategy == '015':
+            if epoch < self.phase1_epochs:
+                return 0.0
+            if epoch < self.phase1_epochs + self.phase2_epochs:
+                progress = (epoch - self.phase1_epochs) / max(1, self.phase2_epochs)
+                return progress * self.phase2_end_lambda
+
             progress = (epoch - self.phase1_epochs - self.phase2_epochs) / self.phase3_epochs
-            return 0.1 + progress * 0.4
+            return self.phase2_end_lambda + progress * (self.phase3_end_lambda - self.phase2_end_lambda)
+
+        # 3175策略
+        if epoch < self.warmup_epochs:
+            return self.warmup_lambda
+        if epoch < self.warmup_epochs + self.ramp_epochs:
+            progress = (epoch - self.warmup_epochs) / self.ramp_epochs
+            return self.warmup_lambda + progress * (self.final_lambda - self.warmup_lambda)
+        return self.final_lambda
 
 
 class TrainerWithTopology:
@@ -128,9 +171,22 @@ class TrainerWithTopology:
             loss_scale=topo_cfg.get('loss_scale', 1.0)
         ).to(self.device)
         
-        # λ调度器（015策略：前30%λ=0，中间30%0→0.1，最后40%0.1→0.5）
+        # λ调度器（多策略，可配置）
         max_epochs = config['training']['max_epochs']
-        self.lambda_scheduler = LambdaScheduler(max_epochs=max_epochs)
+        topo_cfg = config.get('topology', {})
+        lambda_cfg = topo_cfg.get('lambda_schedule', {})
+        self.lambda_scheduler = LambdaScheduler(
+            max_epochs=max_epochs,
+            strategy=lambda_cfg.get('strategy', '015'),
+            phase1_ratio=lambda_cfg.get('phase1_ratio', 0.3),
+            phase2_ratio=lambda_cfg.get('phase2_ratio', 0.3),
+            phase2_end_lambda=lambda_cfg.get('phase2_end_lambda', 0.1),
+            phase3_end_lambda=lambda_cfg.get('phase3_end_lambda', 0.5),
+            warmup_epochs=lambda_cfg.get('warmup_epochs', 30),
+            ramp_epochs=lambda_cfg.get('ramp_epochs', 70),
+            warmup_lambda=lambda_cfg.get('warmup_lambda', 0.1),
+            final_lambda=lambda_cfg.get('final_lambda', 0.5),
+        )
         
         # 早停机制（通过enable_early_stopping开关控制，与基线模型统一）
         self.enable_early_stopping = config['training'].get('enable_early_stopping', True)
@@ -207,7 +263,28 @@ class TrainerWithTopology:
         else:
             return f'{seconds/3600:.0f}h {(seconds%3600)/60:.0f}m'
     
-    def train_epoch(self, train_loader: DataLoader) -> Tuple[float, float, float]:
+    @staticmethod
+    def _normalize_roi_tensor(rois: Any, device: torch.device) -> torch.Tensor:
+        """将DataLoader返回的ROI批次统一为 [B, 1, H, W]。"""
+        if isinstance(rois, torch.Tensor):
+            roi_tensor = rois.to(device)
+        elif isinstance(rois, (list, tuple)):
+            roi_tensor = torch.stack([r.to(device) for r in rois])
+        else:
+            raise TypeError(f'不支持的ROI类型: {type(rois)}')
+
+        if roi_tensor.dim() == 3:
+            # [B, H, W] -> [B, 1, H, W]
+            roi_tensor = roi_tensor.unsqueeze(1)
+        elif roi_tensor.dim() == 4:
+            # [B, 1, H, W] 已正确
+            pass
+        else:
+            raise ValueError(f'ROI张量维度异常: {roi_tensor.shape}, 期望[B,H,W]或[B,1,H,W]')
+
+        return roi_tensor.float()
+
+    def train_epoch(self, train_loader: DataLoader, epoch_idx: int) -> Tuple[float, float, float]:
         """训练一个epoch。
         
         Returns:
@@ -222,8 +299,8 @@ class TrainerWithTopology:
         total_loss_topo = 0.0
         num_batches = len(train_loader)
         
-        # 获取当前λ
-        current_lambda = self.lambda_scheduler.get_lambda(self.current_epoch)
+        # 获取当前λ（epoch_idx为0-based，避免与日志显示错位）
+        current_lambda = self.lambda_scheduler.get_lambda(epoch_idx)
         
         for batch_idx, batch in enumerate(train_loader):
             # 处理list格式的batch [image, vessel, roi]
@@ -231,12 +308,12 @@ class TrainerWithTopology:
                 images, vessels, rois = batch
                 images = images.to(self.device)
                 vessels = vessels.to(self.device)
-                rois = [r.to(self.device) for r in rois]
+                rois = self._normalize_roi_tensor(rois, self.device)
             else:
                 # dict格式（向后兼容）
                 images = batch['image'].to(self.device)
                 vessels = batch['vessel'].to(self.device)
-                rois = [r.to(self.device) for r in batch['roi']]
+                rois = self._normalize_roi_tensor(batch['roi'], self.device)
             
             self.optimizer.zero_grad()
             
@@ -249,9 +326,7 @@ class TrainerWithTopology:
             # 拓扑损失（cripser 0.0.25+ 真正可微分！）
             pred = torch.sigmoid(outputs)
             
-            # 将rois列表转为tensor [B, 1, H, W]
-            roi_tensor = torch.stack([r for r in rois]).unsqueeze(1).float()
-            loss_topo = self.criterion_topo(pred, roi_tensor, self.current_epoch)
+            loss_topo = self.criterion_topo(pred, rois, self.current_epoch)
             
             # 总损失
             loss = loss_dice + current_lambda * loss_topo
@@ -297,32 +372,30 @@ class TrainerWithTopology:
                 images, vessels, rois = batch
                 images = images.to(self.device)
                 vessels = vessels.to(self.device)
-                rois = [r.to(self.device) for r in rois]
+                rois = self._normalize_roi_tensor(rois, self.device)
             else:
                 images = batch['image'].to(self.device)
                 vessels = batch['vessel'].to(self.device)
-                rois = [r.to(self.device) for r in batch['roi']]
+                rois = self._normalize_roi_tensor(batch['roi'], self.device)
             
             outputs = self.model(images)
             pred = torch.sigmoid(outputs)
             
             all_preds.append(pred)
             all_masks.append(vessels)
-            all_rois.extend(rois)
+            all_rois.append(rois)
         
         # 拼接所有批次并转为numpy
         all_preds = torch.cat(all_preds, dim=0).cpu().numpy()
         all_masks = torch.cat(all_masks, dim=0).cpu().numpy()
-        all_rois = [r.cpu().numpy() for r in all_rois]
+        all_rois = torch.cat(all_rois, dim=0).cpu().numpy()
         
         # 逐个样本计算指标并取平均
         all_dice, all_iou, all_prec, all_rec = [], [], [], []
         all_cl_break, all_delta_beta0 = [], []
         
         for i in range(len(all_preds)):
-            roi = all_rois[i]
-            if roi.ndim == 3:
-                roi = roi[0]  # squeeze channel dim
+            roi = all_rois[i, 0] if all_rois.ndim == 4 else all_rois[i]
             
             # 基础指标
             m = compute_basic_metrics(
@@ -344,7 +417,7 @@ class TrainerWithTopology:
                 )
                 all_cl_break.append(topo_m['cl_break'])
                 all_delta_beta0.append(topo_m['delta_beta0'])
-            except:
+            except Exception:
                 all_cl_break.append(0.0)
                 all_delta_beta0.append(0.0)
         
@@ -380,7 +453,7 @@ class TrainerWithTopology:
             self.current_epoch = epoch + 1
             
             # 训练
-            train_loss, train_dice, train_loss_topo = self.train_epoch(train_loader)
+            train_loss, train_dice, train_loss_topo = self.train_epoch(train_loader, epoch)
             
             # 验证
             val_metrics = self.validate(val_loader)
