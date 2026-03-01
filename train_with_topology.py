@@ -302,6 +302,10 @@ class TrainerWithTopology:
         # 获取当前λ（epoch_idx为0-based，避免与日志显示错位）
         current_lambda = self.lambda_scheduler.get_lambda(epoch_idx)
         
+        # 是否开启 topo ROI debug（每个epoch只打印一次）
+        debug_topo_roi = self.config.get('training', {}).get('debug_topo_roi', False)
+        debug_printed = False
+        
         for batch_idx, batch in enumerate(train_loader):
             # 处理list格式的batch [image, vessel, roi]
             if isinstance(batch, (list, tuple)) and len(batch) == 3:
@@ -327,6 +331,35 @@ class TrainerWithTopology:
             pred = torch.sigmoid(outputs)
             
             loss_topo = self.criterion_topo(pred, rois, self.current_epoch)
+            
+            # Debug: 打印 ROI 和 prob_map 统计（每个 epoch 只打印一次）
+            if debug_topo_roi and not debug_printed:
+                with torch.no_grad():
+                    roi_batch = rois[0, 0]  # 取第一个样本 [H, W]
+                    prob_batch = pred[0, 0]  # 取第一个样本 [H, W]
+                    
+                    # ROI 统计
+                    roi_mean = roi_batch.mean().item()
+                    roi_sum = roi_batch.sum().item()
+                    roi_unique = torch.unique(roi_batch).tolist()
+                    
+                    # prob 在 ROI 内外的统计
+                    prob_in_roi = prob_batch[roi_batch == 1].mean().item() if (roi_batch == 1).any() else 0.0
+                    prob_out_roi = prob_batch[roi_batch == 0].mean().item() if (roi_batch == 0).any() else 0.0
+                    
+                    # filtration = 1 - prob
+                    fil_in_roi = (1 - prob_batch)[roi_batch == 1].mean().item() if (roi_batch == 1).any() else 0.0
+                    fil_out_roi = (1 - prob_batch)[roi_batch == 0].mean().item() if (roi_batch == 0).any() else 0.0
+                    
+                    # 获取 loss_scale
+                    loss_scale = getattr(self.criterion_topo, 'loss_scale', 1.0)
+                    
+                    print(f"\n[TopoROI-Debug Epoch {epoch_idx+1}]")
+                    print(f"  ROI: mean={roi_mean:.4f}, sum={roi_sum:.0f}, unique={roi_unique}")
+                    print(f"  Prob: in_roi={prob_in_roi:.4f}, out_roi={prob_out_roi:.4f}, diff={prob_in_roi-prob_out_roi:.4f}")
+                    print(f"  Filtration: in_roi={fil_in_roi:.4f}, out_roi={fil_out_roi:.4f}")
+                    print(f"  Loss: raw={loss_topo.item():.6f}, scaled={loss_topo.item():.6f}, lambda={current_lambda:.4f}, lambda*scale={current_lambda*loss_scale:.4f}")
+                debug_printed = True
             
             # 总损失
             loss = loss_dice + current_lambda * loss_topo
