@@ -220,6 +220,8 @@ class KaggleCombinedDataset(Dataset):
         # 基于图像内容估计FOV ROI（在训练实际输入尺寸上计算）
         if self.roi_mode == 'ones':
             roi_mask = torch.ones((1, image.height, image.width), dtype=torch.float32)
+        elif self.roi_mode == 'tiny':
+            roi_mask = self._create_tiny_mask(image.height, image.width)
         else:
             roi_mask = self._create_fov_mask_from_image(image)
 
@@ -309,6 +311,30 @@ class KaggleCombinedDataset(Dataset):
             roi = largest
 
         return torch.from_numpy(roi.astype(np.float32)).unsqueeze(0)
+    
+    def _create_tiny_mask(self, h: int, w: int, radius_ratio: float = 0.3) -> torch.Tensor:
+        """创建极小的中心圆 ROI（用于极端测试）。
+        
+        Args:
+            h: 图像高度
+            w: 图像宽度
+            radius_ratio: 半径占短边的比例（默认 0.3）
+            
+        Returns:
+            roi_mask: [1, h, w] 中心圆 mask
+        """
+        import torch
+        y = torch.arange(h).float()
+        x = torch.arange(w).float()
+        yy, xx = torch.meshgrid(y, x, indexing='ij')
+        
+        center_y, center_x = h // 2, w // 2
+        radius = min(h, w) * radius_ratio
+        
+        dist = torch.sqrt((yy - center_y) ** 2 + (xx - center_x) ** 2)
+        mask = (dist < radius).float()
+        
+        return mask.unsqueeze(0)
     
     def _find_mask(self, img_path: Path) -> Optional[Path]:
         """
