@@ -263,7 +263,28 @@ class TrainerWithTopology:
         else:
             return f'{seconds/3600:.0f}h {(seconds%3600)/60:.0f}m'
     
-    def train_epoch(self, train_loader: DataLoader) -> Tuple[float, float, float]:
+    @staticmethod
+    def _normalize_roi_tensor(rois: Any, device: torch.device) -> torch.Tensor:
+        """将DataLoader返回的ROI批次统一为 [B, 1, H, W]。"""
+        if isinstance(rois, torch.Tensor):
+            roi_tensor = rois.to(device)
+        elif isinstance(rois, (list, tuple)):
+            roi_tensor = torch.stack([r.to(device) for r in rois])
+        else:
+            raise TypeError(f'不支持的ROI类型: {type(rois)}')
+
+        if roi_tensor.dim() == 3:
+            # [B, H, W] -> [B, 1, H, W]
+            roi_tensor = roi_tensor.unsqueeze(1)
+        elif roi_tensor.dim() == 4:
+            # [B, 1, H, W] 已正确
+            pass
+        else:
+            raise ValueError(f'ROI张量维度异常: {roi_tensor.shape}, 期望[B,H,W]或[B,1,H,W]')
+
+        return roi_tensor.float()
+
+    def train_epoch(self, train_loader: DataLoader, epoch_idx: int) -> Tuple[float, float, float]:
         """训练一个epoch。
         
         Returns:
@@ -278,8 +299,8 @@ class TrainerWithTopology:
         total_loss_topo = 0.0
         num_batches = len(train_loader)
         
-        # 获取当前λ
-        current_lambda = self.lambda_scheduler.get_lambda(self.current_epoch)
+        # 获取当前λ（epoch_idx为0-based，避免与日志显示错位）
+        current_lambda = self.lambda_scheduler.get_lambda(epoch_idx)
         
         for batch_idx, batch in enumerate(train_loader):
             # 处理list格式的batch [image, vessel, roi]
@@ -287,12 +308,12 @@ class TrainerWithTopology:
                 images, vessels, rois = batch
                 images = images.to(self.device)
                 vessels = vessels.to(self.device)
-                rois = [r.to(self.device) for r in rois]
+                rois = self._normalize_roi_tensor(rois, self.device)
             else:
                 # dict格式（向后兼容）
                 images = batch['image'].to(self.device)
                 vessels = batch['vessel'].to(self.device)
-                rois = [r.to(self.device) for r in batch['roi']]
+                rois = self._normalize_roi_tensor(batch['roi'], self.device)
             
             self.optimizer.zero_grad()
             
@@ -305,9 +326,7 @@ class TrainerWithTopology:
             # 拓扑损失（cripser 0.0.25+ 真正可微分！）
             pred = torch.sigmoid(outputs)
             
-            # 将rois列表转为tensor [B, 1, H, W]
-            roi_tensor = torch.stack([r for r in rois]).unsqueeze(1).float()
-            loss_topo = self.criterion_topo(pred, roi_tensor, self.current_epoch)
+            loss_topo = self.criterion_topo(pred, rois, self.current_epoch)
             
             # 总损失
             loss = loss_dice + current_lambda * loss_topo
@@ -353,32 +372,30 @@ class TrainerWithTopology:
                 images, vessels, rois = batch
                 images = images.to(self.device)
                 vessels = vessels.to(self.device)
-                rois = [r.to(self.device) for r in rois]
+                rois = self._normalize_roi_tensor(rois, self.device)
             else:
                 images = batch['image'].to(self.device)
                 vessels = batch['vessel'].to(self.device)
-                rois = [r.to(self.device) for r in batch['roi']]
+                rois = self._normalize_roi_tensor(batch['roi'], self.device)
             
             outputs = self.model(images)
             pred = torch.sigmoid(outputs)
             
             all_preds.append(pred)
             all_masks.append(vessels)
-            all_rois.extend(rois)
+            all_rois.append(rois)
         
         # 拼接所有批次并转为numpy
         all_preds = torch.cat(all_preds, dim=0).cpu().numpy()
         all_masks = torch.cat(all_masks, dim=0).cpu().numpy()
-        all_rois = [r.cpu().numpy() for r in all_rois]
+        all_rois = torch.cat(all_rois, dim=0).cpu().numpy()
         
         # 逐个样本计算指标并取平均
         all_dice, all_iou, all_prec, all_rec = [], [], [], []
         all_cl_break, all_delta_beta0 = [], []
         
         for i in range(len(all_preds)):
-            roi = all_rois[i]
-            if roi.ndim == 3:
-                roi = roi[0]  # squeeze channel dim
+            roi = all_rois[i, 0] if all_rois.ndim == 4 else all_rois[i]
             
             # 基础指标
             m = compute_basic_metrics(
@@ -400,7 +417,7 @@ class TrainerWithTopology:
                 )
                 all_cl_break.append(topo_m['cl_break'])
                 all_delta_beta0.append(topo_m['delta_beta0'])
-            except:
+            except Exception:
                 all_cl_break.append(0.0)
                 all_delta_beta0.append(0.0)
         
@@ -436,7 +453,7 @@ class TrainerWithTopology:
             self.current_epoch = epoch + 1
             
             # 训练
-            train_loss, train_dice, train_loss_topo = self.train_epoch(train_loader)
+            train_loss, train_dice, train_loss_topo = self.train_epoch(train_loader, epoch)
             
             # 验证
             val_metrics = self.validate(val_loader)
