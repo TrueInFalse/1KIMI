@@ -19,8 +19,34 @@ import yaml
 import matplotlib.pyplot as plt
 
 from data_combined import get_combined_loaders
-from model_unet import load_model
+from model_unet import get_unet_model, load_model
 from utils_metrics import compute_all_metrics, tensor_to_numpy
+
+
+def _load_audit_model(checkpoint_path: Path, device: str):
+    """加载审计模型，并兼容缺少config的拓扑训练checkpoint。"""
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # 正常路径：checkpoint内包含config，沿用统一加载逻辑
+    if isinstance(checkpoint, dict) and 'config' in checkpoint:
+        return load_model(checkpoint_path, device=device)
+
+    # 兼容路径：拓扑训练checkpoint可能缺少config，需从首层卷积推断输入通道数
+    state_dict = checkpoint.get('model_state_dict') if isinstance(checkpoint, dict) else None
+    if state_dict is None:
+        raise ValueError(f'无效checkpoint格式，缺少 model_state_dict: {checkpoint_path}')
+
+    first_conv_weight = state_dict.get('encoder.conv1.weight')
+    if first_conv_weight is None:
+        raise ValueError(f'checkpoint缺少 encoder.conv1.weight，无法推断输入通道数: {checkpoint_path}')
+
+    inferred_in_channels = int(first_conv_weight.shape[1])
+    model = get_unet_model(in_channels=inferred_in_channels, pretrained=False)
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    print(f'[评估对比] 兼容加载：checkpoint无config，已推断 in_channels={inferred_in_channels}')
+    return model
 
 
 def _overlay(image: np.ndarray, roi: np.ndarray, out_path: Path) -> None:
@@ -126,7 +152,7 @@ def main(config_path: str = 'config.yaml') -> None:
         return
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = load_model(ckpt, device=device)
+    model = _load_audit_model(ckpt, device=device)
 
     fov_metrics = _evaluate(model, val_loader, device)
 
