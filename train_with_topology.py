@@ -50,6 +50,8 @@ class LambdaScheduler:
     """λ课程学习调度器（支持多策略可扩展）。
 
     当前内置策略:
+    - ``0``:
+      λ恒为0（基线对照，用于消融实验验证）。
     - ``015``:
       前30% epochs λ=0，接着30%线性0→0.1，最后40%线性0.1→0.5。
     - ``3175``:
@@ -89,7 +91,9 @@ class LambdaScheduler:
 
     def _print_schedule_info(self) -> None:
         """打印当前调度策略摘要。"""
-        if self.strategy == '015':
+        if self.strategy == '0':
+            print(f"[λ策略:0] λ恒为0（基线对照，用于消融实验）")
+        elif self.strategy == '015':
             print(
                 f"[λ策略:015] 总轮数{self.max_epochs}: "
                 f"阶段1(λ=0)={self.phase1_epochs}轮, "
@@ -107,11 +111,16 @@ class LambdaScheduler:
         else:
             raise ValueError(
                 f"不支持的lambda策略: {self.strategy}。"
-                f"可选: '015', '3175'"
+                f"可选: '0', '015', '3175'"
             )
     
     def get_lambda(self, epoch: int) -> float:
         """获取当前epoch的λ值。"""
+        # 0策略：λ恒为0（基线对照）
+        if self.strategy == '0':
+            return 0.0
+        
+        # 015策略
         if self.strategy == '015':
             if epoch < self.phase1_epochs:
                 return 0.0
