@@ -163,12 +163,13 @@ class TrainerWithTopology:
         
         # 损失函数
         self.criterion_dice = smp.losses.DiceLoss(mode='binary', from_logits=True)
-        # 拓扑损失（经典稳定版）
+        # 拓扑损失（经典稳定版 + Hinge版）
         topo_cfg = config.get('topology', {})
         self.criterion_topo = CubicalRipserLoss(
             target_beta0=topo_cfg.get('target_beta0', 5),
             max_death=topo_cfg.get('max_death', 0.5),
-            loss_scale=topo_cfg.get('loss_scale', 1.0)
+            loss_scale=topo_cfg.get('loss_scale', 1.0),
+            loss_mode=topo_cfg.get('loss_mode', 'mse')
         ).to(self.device)
         
         # λ调度器（多策略，可配置）
@@ -248,9 +249,20 @@ class TrainerWithTopology:
         """
         if overwrite or not self.log_file.exists():
             with open(self.log_file, 'w') as f:
+                # 任务0: 新增监控列
+                # dice_loss: Dice损失原始值
+                # topo_loss_raw: 拓扑损失原始值（未缩放）
+                # topo_loss_scaled: 拓扑损失缩放后值（实际参与total_loss）
+                # lambda_topo: 当前lambda值
+                # ratio: topo_loss_scaled / (dice_loss + 1e-8)
+                # roi_mode: ROI模式（ones/fov/tiny）
+                # roi_mean: ROI平均值
+                # roi_all_ones: 是否全1 ROI（1=yes, 0=no）
                 f.write('epoch,train_loss,train_dice,train_loss_topo,'
                        'val_dice,val_iou,val_precision,val_recall,'
-                       'cl_break,delta_beta0,lambda,lr\n')
+                       'cl_break,delta_beta0,lambda,lr,'
+                       'dice_loss,topo_loss_raw,topo_loss_scaled,ratio,'
+                       'roi_mode,roi_mean,roi_all_ones\n')
             if overwrite and self.log_file.exists():
                 print(f'注意: 已清空旧日志文件 {self.log_file}')
     
@@ -284,23 +296,40 @@ class TrainerWithTopology:
 
         return roi_tensor.float()
 
-    def train_epoch(self, train_loader: DataLoader, epoch_idx: int) -> Tuple[float, float, float]:
+    def train_epoch(self, train_loader: DataLoader, epoch_idx: int) -> Dict[str, float]:
         """训练一个epoch。
         
         Returns:
-            avg_loss: 平均总损失
-            avg_dice: 平均Dice
-            avg_loss_topo: 平均拓扑损失
+            stats: 包含各项统计指标的字典
+                - avg_loss: 平均总损失
+                - avg_dice: 平均Dice
+                - avg_loss_topo: 平均拓扑损失（含loss_scale）
+                - avg_dice_loss: 平均Dice损失
+                - avg_topo_raw: 平均拓扑损失原始值（不含loss_scale）
+                - avg_topo_scaled: 平均拓扑损失实际参与total_loss的值（=raw*loss_scale*lambda）
+                - avg_ratio: 平均 ratio = topo_scaled / (dice_loss + 1e-8)
+                - roi_mean: ROI平均值
+                - roi_all_ones: 是否全1 ROI（1=yes, 0=no）
         """
         self.model.train()
         
         total_loss = 0.0
         total_dice = 0.0
         total_loss_topo = 0.0
+        total_dice_loss = 0.0
+        total_topo_raw = 0.0
+        total_topo_scaled = 0.0
+        total_ratio = 0.0
+        total_roi_mean = 0.0
+        roi_all_ones_flag = 0
+        
         num_batches = len(train_loader)
         
         # 获取当前λ（epoch_idx为0-based，避免与日志显示错位）
         current_lambda = self.lambda_scheduler.get_lambda(epoch_idx)
+        
+        # 获取loss_scale（从criterion_topo中读取）
+        loss_scale = getattr(self.criterion_topo, 'loss_scale', 1.0)
         
         # 是否开启 topo ROI debug（每个epoch只打印一次）
         debug_topo_roi = self.config.get('training', {}).get('debug_topo_roi', False)
@@ -319,6 +348,16 @@ class TrainerWithTopology:
                 vessels = batch['vessel'].to(self.device)
                 rois = self._normalize_roi_tensor(batch['roi'], self.device)
             
+            # 统计ROI（每个batch的第一个样本）
+            with torch.no_grad():
+                roi_batch = rois[0, 0]  # [H, W]
+                roi_mean = roi_batch.mean().item()
+                roi_unique = torch.unique(roi_batch).tolist()
+                total_roi_mean += roi_mean
+                # 检查是否全1 ROI
+                if len(roi_unique) == 1 and roi_unique[0] == 1.0:
+                    roi_all_ones_flag = 1
+            
             self.optimizer.zero_grad()
             
             # 前向传播
@@ -332,33 +371,39 @@ class TrainerWithTopology:
             
             loss_topo = self.criterion_topo(pred, rois, self.current_epoch)
             
+            # 计算各类损失值
+            # loss_topo 已经包含 loss_scale，所以原始值需要除回去
+            topo_raw = loss_topo.item() / loss_scale if loss_scale > 0 else loss_topo.item()
+            # 实际参与total_loss的拓扑损失 = topo_raw * loss_scale * lambda = loss_topo * lambda
+            topo_scaled = loss_topo.item() * current_lambda
+            # ratio = topo_scaled / (dice_loss + 1e-8)
+            ratio = topo_scaled / (loss_dice.item() + 1e-8)
+            
             # Debug: 打印 ROI 和 prob_map 统计（每个 epoch 只打印一次）
             if debug_topo_roi and not debug_printed:
                 with torch.no_grad():
-                    roi_batch = rois[0, 0]  # 取第一个样本 [H, W]
+                    roi_batch_dbg = rois[0, 0]  # 取第一个样本 [H, W]
                     prob_batch = pred[0, 0]  # 取第一个样本 [H, W]
                     
                     # ROI 统计
-                    roi_mean = roi_batch.mean().item()
-                    roi_sum = roi_batch.sum().item()
-                    roi_unique = torch.unique(roi_batch).tolist()
+                    roi_mean_dbg = roi_batch_dbg.mean().item()
+                    roi_sum = roi_batch_dbg.sum().item()
+                    roi_unique_dbg = torch.unique(roi_batch_dbg).tolist()
                     
                     # prob 在 ROI 内外的统计
-                    prob_in_roi = prob_batch[roi_batch == 1].mean().item() if (roi_batch == 1).any() else 0.0
-                    prob_out_roi = prob_batch[roi_batch == 0].mean().item() if (roi_batch == 0).any() else 0.0
+                    prob_in_roi = prob_batch[roi_batch_dbg == 1].mean().item() if (roi_batch_dbg == 1).any() else 0.0
+                    prob_out_roi = prob_batch[roi_batch_dbg == 0].mean().item() if (roi_batch_dbg == 0).any() else 0.0
                     
                     # filtration = 1 - prob
-                    fil_in_roi = (1 - prob_batch)[roi_batch == 1].mean().item() if (roi_batch == 1).any() else 0.0
-                    fil_out_roi = (1 - prob_batch)[roi_batch == 0].mean().item() if (roi_batch == 0).any() else 0.0
-                    
-                    # 获取 loss_scale
-                    loss_scale = getattr(self.criterion_topo, 'loss_scale', 1.0)
+                    fil_in_roi = (1 - prob_batch)[roi_batch_dbg == 1].mean().item() if (roi_batch_dbg == 1).any() else 0.0
+                    fil_out_roi = (1 - prob_batch)[roi_batch_dbg == 0].mean().item() if (roi_batch_dbg == 0).any() else 0.0
                     
                     print(f"\n[TopoROI-Debug Epoch {epoch_idx+1}]")
-                    print(f"  ROI: mean={roi_mean:.4f}, sum={roi_sum:.0f}, unique={roi_unique}")
+                    print(f"  ROI: mean={roi_mean_dbg:.4f}, sum={roi_sum:.0f}, unique={roi_unique_dbg}")
                     print(f"  Prob: in_roi={prob_in_roi:.4f}, out_roi={prob_out_roi:.4f}, diff={prob_in_roi-prob_out_roi:.4f}")
                     print(f"  Filtration: in_roi={fil_in_roi:.4f}, out_roi={fil_out_roi:.4f}")
-                    print(f"  Loss: raw={loss_topo.item():.6f}, scaled={loss_topo.item():.6f}, lambda={current_lambda:.4f}, lambda*scale={current_lambda*loss_scale:.4f}")
+                    print(f"  Loss: raw={topo_raw:.6f}, scaled={topo_scaled:.6f}, lambda={current_lambda:.4f}, loss_scale={loss_scale:.4f}")
+                    print(f"  Ratio: {ratio:.4f} (topo_scaled / dice_loss)")
                 debug_printed = True
             
             # 总损失
@@ -372,6 +417,10 @@ class TrainerWithTopology:
             # 统计
             total_loss += loss.item()
             total_loss_topo += loss_topo.item()
+            total_dice_loss += loss_dice.item()
+            total_topo_raw += topo_raw
+            total_topo_scaled += topo_scaled
+            total_ratio += ratio
             
             with torch.no_grad():
                 pred_binary = (pred > 0.5).float()
@@ -380,11 +429,19 @@ class TrainerWithTopology:
             
             self.global_step += 1
         
-        avg_loss = total_loss / num_batches
-        avg_dice = total_dice / num_batches
-        avg_loss_topo = total_loss_topo / num_batches
+        stats = {
+            'avg_loss': total_loss / num_batches,
+            'avg_dice': total_dice / num_batches,
+            'avg_loss_topo': total_loss_topo / num_batches,
+            'avg_dice_loss': total_dice_loss / num_batches,
+            'avg_topo_raw': total_topo_raw / num_batches,
+            'avg_topo_scaled': total_topo_scaled / num_batches,
+            'avg_ratio': total_ratio / num_batches,
+            'roi_mean': total_roi_mean / num_batches,
+            'roi_all_ones': roi_all_ones_flag,
+        }
         
-        return avg_loss, avg_dice, avg_loss_topo
+        return stats
     
     @torch.no_grad()
     def validate(self, val_loader: DataLoader) -> Dict[str, float]:
@@ -482,11 +539,23 @@ class TrainerWithTopology:
         print(f'开始时间: {self.start_time.strftime("%Y-%m-%d %H:%M:%S")}')
         print('=' * 80)
         
+        # 获取ROI模式（用于日志记录）
+        roi_mode = self.config.get('data', {}).get('kaggle_roi', {}).get('mode', 'ones')
+        
         for epoch in range(max_epochs):
             self.current_epoch = epoch + 1
             
-            # 训练
-            train_loss, train_dice, train_loss_topo = self.train_epoch(train_loader, epoch)
+            # 训练（返回字典格式的统计信息）
+            train_stats = self.train_epoch(train_loader, epoch)
+            train_loss = train_stats['avg_loss']
+            train_dice = train_stats['avg_dice']
+            train_loss_topo = train_stats['avg_loss_topo']
+            train_dice_loss = train_stats['avg_dice_loss']
+            train_topo_raw = train_stats['avg_topo_raw']
+            train_topo_scaled = train_stats['avg_topo_scaled']
+            train_ratio = train_stats['avg_ratio']
+            train_roi_mean = train_stats['roi_mean']
+            train_roi_all_ones = train_stats['roi_all_ones']
             
             # 验证
             val_metrics = self.validate(val_loader)
@@ -509,15 +578,20 @@ class TrainerWithTopology:
             print(f'  Train Loss: {train_loss:.4f} | Train Dice: {train_dice:.4f} | Train Topo: {train_loss_topo:.4f} (含loss_scale)')
             print(f'  Val Dice: {val_dice:.4f} | Val IoU: {val_metrics["iou"]:.4f} | Val Prec: {val_metrics["precision"]:.4f} | Val Rec: {val_metrics["recall"]:.4f}')
             print(f'  CL-Break: {val_metrics.get("cl_break", 0):.1f} | Δβ₀: {val_metrics.get("delta_beta0", 0):.1f}')
+            print(f'  Ratio: {train_ratio:.4f} | DiceLoss: {train_dice_loss:.4f} | TopoScaled: {train_topo_scaled:.4f}')
+            if train_roi_all_ones:
+                print(f'  [警告] ROI_ALL_ONES=1，ROI掩码可能未生效！')
             print(f'  Each Time: {self.format_time(epoch_time)} | Total Time: {self.format_time(elapsed)} | ETA: {self.format_time(eta)} | LR: {current_lr:.6f}')
             
-            # 保存日志
+            # 保存日志（任务0: 新增监控列）
             with open(self.log_file, 'a') as f:
                 f.write(f'{self.current_epoch},{train_loss:.4f},{train_dice:.4f},'
                        f'{train_loss_topo:.4f},{val_dice:.4f},{val_metrics["iou"]:.4f},'
                        f'{val_metrics["precision"]:.4f},{val_metrics["recall"]:.4f},'
                        f'{val_metrics.get("cl_break", 0):.1f},{val_metrics.get("delta_beta0", 0):.1f},'
-                       f'{current_lambda:.3f},{current_lr:.6f}\n')
+                       f'{current_lambda:.3f},{current_lr:.6f},'
+                       f'{train_dice_loss:.6f},{train_topo_raw:.6f},{train_topo_scaled:.6f},{train_ratio:.6f},'
+                       f'{roi_mode},{train_roi_mean:.4f},{train_roi_all_ones}\n')
             
             # 保存最佳模型
             if val_dice > self.best_val_dice:

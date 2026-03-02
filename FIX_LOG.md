@@ -274,3 +274,41 @@ Epoch 120-200: λ=0.1→0.5 (拓扑强约束)
 - 日志中"Train Topo"值为**loss_scale后的值**（已乘以loss_scale）
 - 当前config: loss_scale=100.0
 - 如需调整拓扑权重，修改 `config.yaml` 中的 `topology.loss_scale`
+
+## 2026-03-01: 止血调参完成 - Topo Loss 不降低 Dice 且带来拓扑改进
+
+### 实验配置
+- **Loss Mode**: MSE
+- **Lambda 策略**: 015 (50%预训练, 30% ramp, 20%保持)
+  - Phase 1 (E1-5): λ=0 (纯Dice预训练)
+  - Phase 2 (E6-8): λ=0→0.1
+  - Phase 3 (E9-10): λ=0.1→0.2
+- **Loss Scale**: 100.0
+- **ROI Mode**: fov
+
+### 关键结果 (10 epoch)
+| 指标 | Baseline | Topo | 变化 |
+|------|----------|------|------|
+| Val Dice | 0.4422 | 0.4711 | **+0.0289** ✅ |
+| CL-Break | 55.0 | 47.6 | **-7.4 (13.5%)** ✅ |
+| Max Ratio | - | 0.0745 | **< 0.1** ✅ |
+
+### 关键发现
+1. **延长纯Dice预训练至50% epochs**是关键 - 让模型先学好基础分割
+2. **控制最终lambda=0.2** - 避免topo loss过强抑制Dice
+3. **Ratio始终<0.1** - 符合止血阈值， topo loss不主导训练
+4. **Topo Dice 超过 Baseline** - 证明topo loss带来正向收益
+
+### 实验演进
+| 配置 | Max Ratio | Val Dice | 结果 |
+|------|-----------|----------|------|
+| 原始(3175, loss_scale=100) | 0.08 | 0.18 | ❌ Dice过低 |
+| 015策略(30%预训练) | 0.05 | 0.41 | ⚠️ 略低于Baseline |
+| **015策略(50%预训练, lambda_max=0.2)** | **0.07** | **0.47** | **✅ 超过Baseline** |
+
+### 验收状态
+- ✅ Ratio < 0.1 (止血阈值)
+- ✅ Dice 不降低 (实际超过Baseline)
+- ✅ CL-Break 改善 13.5%
+- ✅ 拓扑收益可证伪
+
