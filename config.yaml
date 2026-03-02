@@ -1,78 +1,82 @@
+# DRIVE视网膜血管分割配置文件
+# 项目: retina_ph_seg
+# 阶段: Stage 0 - 数据验证框架
+
 data:
-  augmentation:
-    brightness_range: 0.0
-    horizontal_flip: true
-    rotation_range: 0
-  img_size: 512
-  kaggle_roi:
-    mode: fov
-    padding_scale: 1.03
-    threshold: 8
-  root: ./DRIVE
-  test_ids:
-  - 1
-  - 2
-  - 3
-  - 4
-  - 5
-  - 6
-  - 7
-  - 8
-  - 9
-  - 10
-  - 11
-  - 12
-  - 13
-  - 14
-  - 15
-  - 16
-  - 17
-  - 18
-  - 19
-  - 20
-  train_ids:
-  - 21
-  - 22
-  - 23
-  - 24
-  - 25
-  - 26
-  - 27
-  - 28
-  - 29
-  - 30
-  - 31
-  - 32
-  - 33
-  - 34
-  - 35
-  - 36
+  # ==================== 数据集选择 ====================
+  # 双模式切换：false = 纯DRIVE, true = Kaggle联合数据集
+  # 联合数据集: DRIVE-HRF-CHASE DB1-STARE (自动下载)
   use_kaggle_combined: true
-  val_ids:
-  - 37
-  - 38
-  - 39
-  - 40
-loss:
-  mode: binary
-  name: dice
-metrics:
-  compute_topology: true
-  topology_threshold: 0.5
+  
+  # 数据集根目录 (DRIVE模式使用)
+  root: ./DRIVE
+
+  # 训练集图像ID (16张: 21-36, DRIVE模式使用)
+  train_ids: [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36]
+
+  # 验证集图像ID (4张: 37-40)
+  val_ids: [37, 38, 39, 40]
+
+  # 测试集图像ID (20张: 01-20, 仅用于最终推理)
+  test_ids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+
+  # 图像预处理参数
+  img_size: 512          # 输入图像尺寸 (原图565×584，512接近原尺寸且是2的幂次)
+                         # 调大：增加细节，但内存消耗增加，可能需减小batch_size。
+                         # 调小：减少计算量，但可能丢失细微血管，影响分割精度。
+
+  # in_channels: 3      # 已统一为RGB 3通道（见data_drive.py和train_with_topology.py）
+                         # 所有数据集（DRIVE和Kaggle）统一输出RGB [3,H,W]
+
+  # 数据增强参数 (Stage 0仅使用最基础的增强)
+  augmentation:
+    horizontal_flip: true    # 水平翻转。开启增加数据多样性，减少过拟合，对血管对称性无影响。
+    rotation_range: 0        # 暂不启用旋转。若开启可提升旋转不变性，但需注意血管方向性可能受影响。
+    brightness_range: 0.0    # 暂不启用亮度调整。若开启可增强亮度鲁棒性，但可能改变对比度影响分割。
+
+  # Kaggle联合数据集ROI配置（仅在use_kaggle_combined=true时生效）
+  kaggle_roi:
+    mode: fov                # fov=基于图像内容估计FOV；ones=全1（用于对照评估）
+    threshold: 8             # 非黑像素阈值（0-255）
+    padding_scale: 1.03      # 拟合椭圆外扩系数（>1更保守）
+
+# 训练参数 (Stage 1使用)
+training:
+  batch_size: 4          # 批次大小。调大：梯度估计更准，收敛更稳定，但显存需求大；调小：可能震荡，需降低学习率。
+  num_workers: 4         # 数据加载线程数。调大：加快数据加载，但过多可能增加CPU开销；调小：可能成为瓶颈。
+  learning_rate: 1.0e-4  # 初始学习率。调大：收敛快，但可能不稳定或错过最优；调小：收敛慢，但更稳定。
+  max_epochs: 200        # 最大训练轮数。调大：有机会更好，但可能过拟合；调小：可能欠拟合。
+  patience: 20           # 早停耐心值（监控val_dice）。调大：允许更多轮无改善，可能避免早停，但延长训练。
+                         # 调小：更早停止，防止过拟合，但可能错过后续提升。
+  enable_early_stopping: false  # true=启用早停，false=禁用早停（跑满max_epochs）
+  device: cuda
+  seed: 42               # 随机种子。固定后可复现结果。
+
+  # 检查点与日志设置
+  checkpoint_dir: ./checkpoints
+  log_dir: ./logs
+
+# 模型参数 (Stage 1使用)
 model:
-  activation: null
-  encoder: resnet34
-  encoder_weights: imagenet
   name: unet
-  pretrained: true
+  encoder: resnet34      # 编码器（统一使用RGB 3通道输入，适配ImageNet预训练权重）
+  pretrained: true       # ImageNet预训练权重。true加快收敛，提升性能，但需适配单通道。
+  encoder_weights: imagenet
+  activation: null       # 输出logits，不激活（smp.losses.DiceLoss会自动sigmoid）
+
+# 损失函数参数
+loss:
+  name: dice
+  mode: binary
+
+# 评估指标参数
+metrics:
+  compute_topology: true    # 是否计算CL-Break和Δβ₀（仅日志，不影响训练）。开启可监控拓扑性能。
+  topology_threshold: 0.5   # 二值化阈值（计算拓扑指标用）。调高：分割更保守，可能减少假阳性，但增加断裂；
+                            # 调低：分割更敏感，可能增加假阳性，但连通性更好。
+
+# 拓扑损失参数（经典稳定版）
 topology:
-<<<<<<< HEAD
-  compute_freq: 1
-  disable_skip: true
-  disable_topo_loss: false
-  edge_protect: true
-  high_confidence_thresh: 0.9
-=======
   target_beta0: 5          # 目标连通分量数（经典版固定5，适合血管树）
   max_death: 0.5           # filtration域中最大death值
   loss_scale: 100.0          # 损失缩放因子（默认1.0，通过实验调整）
@@ -84,30 +88,31 @@ topology:
   # 可选策略：
   #   - "015": 前30% λ=0，中间30%线性0→0.1，最后40%线性0.1→0.5
   #   - "3175": 前30ep固定0.1，后70ep线性到0.5，剩余epoch固定0.5
->>>>>>> b0720f9 (止血：加入ratio监控并优化topo强度，Baseline对照通过)
   lambda_schedule:
-    final_lambda: 0.5
-    phase1_ratio: 0.5
-    phase2_end_lambda: 0.1
+    strategy: "3175"   # 选择λ调度策略（"015"或"3175"）。切换策略会自动使用对应参数，无需修改代码。
+
+    # ===== 策略015参数 =====
+    phase1_ratio: 0.3
     phase2_ratio: 0.3
-    phase3_end_lambda: 0.2
-    ramp_epochs: 70
-    strategy: '015'
+    phase2_end_lambda: 0.1
+    phase3_end_lambda: 0.5
+
+    # ===== 策略3175参数 =====
     warmup_epochs: 30
+    ramp_epochs: 70
     warmup_lambda: 0.1
-  loss_mode: mse
-  loss_scale: 100.0
-  low_confidence_thresh: 0.1
-  max_death: 0.5
-  target_beta0: 5
-training:
-  batch_size: 4
-  checkpoint_dir: ./checkpoints
-  device: cuda
-  enable_early_stopping: false
-  learning_rate: 0.0001
-  log_dir: ./logs
-  max_epochs: 10
-  num_workers: 4
-  patience: 20
-  seed: 42
+    final_lambda: 0.5
+
+  compute_freq: 1           # 拓扑损失计算频率（每N个iteration）。调大：每N次算一次，节省计算，但梯度更新滞后；
+                            # 调小：更频繁，但计算负担重。设为1则每次迭代都算。
+  disable_skip: true       # 是否禁用跳步计算（调试用）。若false且compute_freq>1，则跳步，可能影响收敛一致性。
+
+  # 边缘保护参数（防止假阳性桥接）
+  edge_protect: true        # 启用硬边界保护。开启后，高置信度前景/背景区域被强制不改变，防止错误连接。
+  high_confidence_thresh: 0.9  # 高置信度前景阈值（不允许降低）。调高：更保守，允许调整的区域更少；调低：允许更多调整。
+  low_confidence_thresh: 0.1   # 高置信度背景阈值（不允许提高）。调高：背景更易被保护；调低：背景更易被激活。
+
+
+  # 消融实验开关（验证拓扑损失有效性）
+  # 设为true可禁用拓扑损失，仅训练Dice基线
+  disable_topo_loss: false  # 默认false（启用拓扑损失）。用于对比实验，评估拓扑损失带来的增益。
