@@ -646,6 +646,17 @@ class TrainerWithTopology:
         print('=' * 80)
 
 
+def set_seed(seed: int = 42) -> None:
+    """设置随机种子（与train_baseline.py一致）。"""
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def main():
     """主函数。"""
     import argparse
@@ -660,6 +671,9 @@ def main():
     # 加载配置
     with open('config.yaml', 'r') as f:
         config = yaml.safe_load(f)
+    
+    # 设置随机种子（与baseline一致）
+    set_seed(config['training'].get('seed', 42))
     
     # 命令行参数覆盖配置
     if args.epochs:
