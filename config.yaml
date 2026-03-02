@@ -66,11 +66,25 @@ model:
   name: unet
   pretrained: true
 topology:
+<<<<<<< HEAD
   compute_freq: 1
   disable_skip: true
   disable_topo_loss: false
   edge_protect: true
   high_confidence_thresh: 0.9
+=======
+  target_beta0: 5          # 目标连通分量数（经典版固定5，适合血管树）
+  max_death: 0.5           # filtration域中最大death值
+  loss_scale: 100.0          # 损失缩放因子（默认1.0，通过实验调整）
+                            # 调大：拓扑约束更强；调小：拓扑影响减弱
+  loss_mode: mse             # 损失模式：'mse'=经典MSE到目标lifetime；'hinge'=只惩罚短lifetime（防御性loss）
+
+  # λ调度策略（支持多策略，可扩展）
+  # 使用方式：只切换 strategy 即可，后续新增策略只需在 train_with_topology.py 中追加。
+  # 可选策略：
+  #   - "015": 前30% λ=0，中间30%线性0→0.1，最后40%线性0.1→0.5
+  #   - "3175": 前30ep固定0.1，后70ep线性到0.5，剩余epoch固定0.5
+>>>>>>> b0720f9 (止血：加入ratio监控并优化topo强度，Baseline对照通过)
   lambda_schedule:
     final_lambda: 0.5
     phase1_ratio: 0.5
