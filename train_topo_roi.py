@@ -33,7 +33,7 @@ import segmentation_models_pytorch as smp
 from data_combined import get_combined_loaders
 from model_unet import get_unet_model, count_parameters
 from utils_metrics import compute_basic_metrics, compute_topology_metrics, tensor_to_numpy
-from topology_loss import CubicalRipserLoss
+from topology_loss_ablation import TopologicalRegularizerAblation
 
 
 def compute_dice_loss_roi(pred_logits, target, roi_mask, eps=1e-7):
@@ -138,14 +138,20 @@ class TrainerWithTopologyROI:
         
         self._setup_model()
         
-        # 损失函数
+        # 损失函数（消融实验版）
         topo_cfg = config.get('topology', {})
-        self.criterion_topo = CubicalRipserLoss(
+        # 从args获取loss_mode，默认为standard
+        loss_mode = getattr(args, 'loss_mode', 'standard') if args else 'standard'
+        self.criterion_topo = TopologicalRegularizerAblation(
             target_beta0=topo_cfg.get('target_beta0', 5),
             max_death=topo_cfg.get('max_death', 0.5),
-            loss_scale=topo_cfg.get('loss_scale', 1.0),
-            loss_mode=topo_cfg.get('loss_mode', 'mse')
+            loss_scale=topo_cfg.get('loss_scale', 100.0),
+            loss_mode=loss_mode,
+            target_lifetime=topo_cfg.get('target_lifetime', 0.5),
+            main_boost_factor=topo_cfg.get('main_boost_factor', 1.0),
+            fragment_penalty_factor=topo_cfg.get('fragment_penalty_factor', 1.0)
         ).to(self.device)
+        self.loss_mode = loss_mode
         
         # λ调度器
         max_epochs = config['training']['max_epochs']
@@ -320,6 +326,9 @@ class TrainerWithTopologyROI:
             
             self.global_step += 1
         
+        # 收集PD统计信息（用于消融实验分析）
+        pd_stats = self.criterion_topo.get_last_pd_stats()
+        
         stats = {
             'avg_loss': total_loss / num_batches,
             'avg_dice': total_dice / num_batches,
@@ -329,6 +338,7 @@ class TrainerWithTopologyROI:
             'avg_topo_scaled': total_topo_scaled / num_batches,
             'avg_ratio': total_ratio / num_batches,
             'roi_mean': total_roi_mean / num_batches,
+            'pd_stats': pd_stats[0] if pd_stats else None,  # 取第一个样本的统计
         }
         
         return stats
@@ -446,6 +456,15 @@ class TrainerWithTopologyROI:
             print(f'  ROI Mean: {train_roi_mean:.4f} | ROI Mode: {roi_mode}')
             print(f'  Each Time: {self.format_time(epoch_time)} | Total Time: {self.format_time(elapsed)} | ETA: {self.format_time(eta)} | LR: {current_lr:.6f}')
             
+            # 打印PD统计信息（消融实验分析用）
+            if self.current_epoch in [1, 5, 10, 20] and train_stats.get('pd_stats'):
+                pd_stats = train_stats['pd_stats']
+                print(f'\n  [PD Stats - Epoch {self.current_epoch}]')
+                print(f'    Num Finite: {pd_stats["num_finite"]}')
+                print(f'    Max Lifetime: {pd_stats["max_lifetime"]:.4f}')
+                print(f'    Top5 Lifetimes: {[f"{x:.4f}" for x in pd_stats["top5_lifetimes"]]}')
+                print(f'    Fragments Mean (excl. main): {pd_stats["fragments_mean"]:.4f}')
+            
             with open(self.log_file, 'a') as f:
                 f.write(f'{self.current_epoch},{train_loss:.4f},{train_dice:.4f},{train_dice_loss_roi:.6f},{train_loss_topo:.4f},'
                        f'{val_dice:.4f},{val_metrics["iou"]:.4f},{val_metrics["precision"]:.4f},{val_metrics["recall"]:.4f},'
@@ -501,6 +520,9 @@ def main():
     
     parser = argparse.ArgumentParser(description='端到端拓扑正则训练（ROI对齐版）')
     parser.add_argument('--epochs', type=int, default=20, help='训练轮数')
+    parser.add_argument('--loss-mode', type=str, default='standard', 
+                        choices=['standard', 'main_component', 'fragment_suppress'],
+                        help='Topo loss模式: standard=当前实现, main_component=主分量增强, fragment_suppress=碎片抑制')
     args = parser.parse_args()
     
     with open('config.yaml', 'r') as f:
@@ -510,6 +532,10 @@ def main():
     
     if args.epochs:
         config['training']['max_epochs'] = args.epochs
+    
+    print(f"\n{'='*60}")
+    print(f"Topo Loss 消融实验: loss_mode = {args.loss_mode}")
+    print(f"{'='*60}\n")
     
     trainer = TrainerWithTopologyROI(config, args)
     train_loader, val_loader, _ = get_combined_loaders(config)
