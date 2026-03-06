@@ -1,0 +1,520 @@
+# -*- coding: utf-8 -*-
+"""
+文件名: train_topo_roi.py
+项目: retina_ph_seg
+功能: 端到端拓扑正则训练（ROI对齐版）
+
+与原版区别:
+- 训练时Dice loss在ROI内计算（与验证口径一致）
+- 其他Topo逻辑保持不变
+
+作者: AI Assistant
+创建日期: 2026-03-06
+"""
+
+import os
+import time
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, Tuple, Optional, List, Any
+from dataclasses import dataclass
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.optim import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import DataLoader
+import yaml
+from tqdm import tqdm
+import segmentation_models_pytorch as smp
+
+from data_combined import get_combined_loaders
+from model_unet import get_unet_model, count_parameters
+from utils_metrics import compute_basic_metrics, compute_topology_metrics, tensor_to_numpy
+from topology_loss import CubicalRipserLoss
+
+
+def compute_dice_loss_roi(pred_logits, target, roi_mask, eps=1e-7):
+    """在ROI内计算Dice loss"""
+    pred = torch.sigmoid(pred_logits)
+    
+    # 应用ROI mask
+    pred = pred * roi_mask
+    target = target * roi_mask
+    
+    intersection = (pred * target).sum(dim=(1, 2, 3))
+    union = pred.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3))
+    
+    dice = (2.0 * intersection + eps) / (union + eps)
+    loss = 1.0 - dice.mean()
+    
+    return loss
+
+
+class LambdaScheduler:
+    """λ课程学习调度器（与原版相同）"""
+    
+    def __init__(
+        self,
+        max_epochs: int = 200,
+        strategy: str = '3175',
+        warmup_epochs: int = 30,
+        ramp_epochs: int = 70,
+        warmup_lambda: float = 0.1,
+        final_lambda: float = 0.5
+    ):
+        self.max_epochs = max_epochs
+        self.strategy = strategy.lower()
+        self.warmup_epochs = warmup_epochs
+        self.ramp_epochs = max(1, ramp_epochs)
+        self.warmup_lambda = warmup_lambda
+        self.final_lambda = final_lambda
+        self._print_schedule_info()
+
+    def _print_schedule_info(self) -> None:
+        if self.strategy == '0':
+            print(f"[λ策略:0] λ恒为0（基线对照）")
+        elif self.strategy == '3175':
+            hold_epochs = max(0, self.max_epochs - self.warmup_epochs - self.ramp_epochs)
+            print(f"[λ策略:3175] 总轮数{self.max_epochs}: 阶段1(固定{self.warmup_lambda})={self.warmup_epochs}轮, 阶段2(线性{self.warmup_lambda}→{self.final_lambda})={self.ramp_epochs}轮, 阶段3(固定{self.final_lambda})={hold_epochs}轮")
+        else:
+            raise ValueError(f"不支持的lambda策略: {self.strategy}")
+    
+    def get_lambda(self, epoch: int) -> float:
+        if self.strategy == '0':
+            return 0.0
+        if epoch < self.warmup_epochs:
+            return self.warmup_lambda
+        if epoch < self.warmup_epochs + self.ramp_epochs:
+            progress = (epoch - self.warmup_epochs) / self.ramp_epochs
+            return self.warmup_lambda + progress * (self.final_lambda - self.warmup_lambda)
+        return self.final_lambda
+
+
+class EarlyStopping:
+    """早停机制（与原版相同）"""
+    
+    def __init__(self, patience: int = 20, min_delta: float = 1e-4, mode: str = 'max'):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.mode = mode
+        self.counter = 0
+        self.best_value = float('-inf') if mode == 'max' else float('inf')
+        self.early_stop = False
+        self.best_epoch = 0
+    
+    def __call__(self, value: float, epoch: int) -> bool:
+        if self.mode == 'max':
+            improved = value > self.best_value + self.min_delta
+        else:
+            improved = value < self.best_value - self.min_delta
+        
+        if improved:
+            self.best_value = value
+            self.counter = 0
+            self.best_epoch = epoch
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        
+        return self.early_stop
+
+
+class TrainerWithTopologyROI:
+    """带拓扑正则的训练器（ROI对齐版）"""
+    
+    def __init__(self, config: Dict, args: Optional[Any] = None):
+        self.config = config
+        self.args = args
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        self.checkpoint_dir = Path('./checkpoints')
+        self.log_dir = Path('./logs')
+        self.checkpoint_dir.mkdir(exist_ok=True)
+        self.log_dir.mkdir(exist_ok=True)
+        
+        self._setup_model()
+        
+        # 损失函数
+        topo_cfg = config.get('topology', {})
+        self.criterion_topo = CubicalRipserLoss(
+            target_beta0=topo_cfg.get('target_beta0', 5),
+            max_death=topo_cfg.get('max_death', 0.5),
+            loss_scale=topo_cfg.get('loss_scale', 1.0),
+            loss_mode=topo_cfg.get('loss_mode', 'mse')
+        ).to(self.device)
+        
+        # λ调度器
+        max_epochs = config['training']['max_epochs']
+        lambda_cfg = topo_cfg.get('lambda_schedule', {})
+        self.lambda_scheduler = LambdaScheduler(
+            max_epochs=max_epochs,
+            strategy=lambda_cfg.get('strategy', '3175'),
+            warmup_epochs=lambda_cfg.get('warmup_epochs', 30),
+            ramp_epochs=lambda_cfg.get('ramp_epochs', 70),
+            warmup_lambda=lambda_cfg.get('warmup_lambda', 0.1),
+            final_lambda=lambda_cfg.get('final_lambda', 0.5),
+        )
+        
+        # 早停机制
+        self.enable_early_stopping = config['training'].get('enable_early_stopping', True)
+        if self.enable_early_stopping:
+            self.early_stopping = EarlyStopping(
+                patience=config['training']['patience'],
+                mode='max'
+            )
+        else:
+            self.early_stopping = None
+        
+        # 日志（ROI对齐版）
+        self.log_file = self.log_dir / 'training_topo_roi_log.csv'
+        self._init_log(overwrite=True)
+        
+        self.current_epoch = 0
+        self.global_step = 0
+        self.best_val_dice = 0.0
+        self.start_time = None
+        
+        print(f'设备: {self.device}')
+        print(f'拓扑损失: CubicalRipserLoss (ROI对齐版)')
+    
+    def _setup_model(self) -> None:
+        """初始化模型"""
+        model_cfg = self.config['model']
+        self.in_channels = 3
+        print('注意: 统一使用RGB 3通道输入（适配ImageNet预训练）')
+        
+        self.model = get_unet_model(
+            in_channels=3,
+            encoder=model_cfg['encoder'],
+            pretrained=model_cfg['pretrained'],
+            activation=model_cfg.get('activation', None)
+        ).to(self.device)
+        
+        self.optimizer = Adam(
+            self.model.parameters(),
+            lr=self.config['training']['learning_rate']
+        )
+        
+        self.scheduler = CosineAnnealingLR(
+            self.optimizer,
+            T_max=self.config['training']['max_epochs'],
+            eta_min=self.config['training']['learning_rate'] * 0.01
+        )
+        
+        print(f'模型参数量: {count_parameters(self.model):,}')
+    
+    def _init_log(self, overwrite: bool = False) -> None:
+        """初始化日志文件（ROI对齐版）"""
+        if overwrite or not self.log_file.exists():
+            with open(self.log_file, 'w') as f:
+                f.write('epoch,train_loss,train_dice,train_dice_loss_roi,train_loss_topo,'
+                       'val_dice,val_iou,val_precision,val_recall,'
+                       'cl_break,delta_beta0,lambda,lr,'
+                       'topo_loss_raw,topo_loss_scaled,ratio,'
+                       'roi_mode,roi_mean\n')
+    
+    def format_time(self, seconds: float) -> str:
+        """格式化时间"""
+        if seconds < 60:
+            return f'{seconds:.0f}s'
+        elif seconds < 3600:
+            return f'{seconds/60:.0f}m {seconds%60:.0f}s'
+        else:
+            return f'{seconds/3600:.0f}h {(seconds%3600)/60:.0f}m'
+    
+    @staticmethod
+    def _normalize_roi_tensor(rois: Any, device: torch.device) -> torch.Tensor:
+        """将ROI批次统一为 [B, 1, H, W]"""
+        if isinstance(rois, torch.Tensor):
+            roi_tensor = rois.to(device)
+        elif isinstance(rois, (list, tuple)):
+            roi_tensor = torch.stack([r.to(device) for r in rois])
+        else:
+            raise TypeError(f'不支持的ROI类型: {type(rois)}')
+
+        if roi_tensor.dim() == 3:
+            roi_tensor = roi_tensor.unsqueeze(1)
+        elif roi_tensor.dim() == 4:
+            pass
+        else:
+            raise ValueError(f'ROI张量维度异常: {roi_tensor.shape}')
+
+        return roi_tensor.float()
+    
+    def train_epoch(self, train_loader: DataLoader, epoch_idx: int) -> Dict[str, float]:
+        """训练一个epoch（ROI对齐版）"""
+        self.model.train()
+        
+        total_loss = 0.0
+        total_dice = 0.0
+        total_dice_loss_roi = 0.0
+        total_loss_topo = 0.0
+        total_topo_raw = 0.0
+        total_topo_scaled = 0.0
+        total_ratio = 0.0
+        total_roi_mean = 0.0
+        
+        num_batches = len(train_loader)
+        current_lambda = self.lambda_scheduler.get_lambda(epoch_idx)
+        loss_scale = getattr(self.criterion_topo, 'loss_scale', 1.0)
+        
+        for batch_idx, batch in enumerate(train_loader):
+            if isinstance(batch, (list, tuple)) and len(batch) == 3:
+                images, vessels, rois = batch
+                images = images.to(self.device)
+                vessels = vessels.to(self.device)
+                rois = self._normalize_roi_tensor(rois, self.device)
+            else:
+                images = batch['image'].to(self.device)
+                vessels = batch['vessel'].to(self.device)
+                rois = self._normalize_roi_tensor(batch['roi'], self.device)
+            
+            # 统计ROI
+            with torch.no_grad():
+                roi_mean = rois[0, 0].mean().item()
+                total_roi_mean += roi_mean
+            
+            self.optimizer.zero_grad()
+            
+            # 前向传播
+            outputs = self.model(images)
+            
+            # Dice损失（ROI内计算 - 关键修改）
+            loss_dice = compute_dice_loss_roi(outputs, vessels, rois)
+            
+            # 拓扑损失
+            pred = torch.sigmoid(outputs)
+            loss_topo = self.criterion_topo(pred, rois, self.current_epoch)
+            
+            # 计算各类损失值
+            topo_raw = loss_topo.item() / loss_scale if loss_scale > 0 else loss_topo.item()
+            topo_scaled = loss_topo.item() * current_lambda
+            ratio = topo_scaled / (loss_dice.item() + 1e-8)
+            
+            # 总损失
+            loss = loss_dice + current_lambda * loss_topo
+            
+            # 反向传播
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            self.optimizer.step()
+            
+            # 统计
+            total_loss += loss.item()
+            total_loss_topo += loss_topo.item()
+            total_dice_loss_roi += loss_dice.item()
+            total_topo_raw += topo_raw
+            total_topo_scaled += topo_scaled
+            total_ratio += ratio
+            
+            with torch.no_grad():
+                pred_binary = (pred > 0.5).float()
+                # ROI内估算Dice
+                intersection = (pred_binary * vessels * rois).sum()
+                dice = (2 * intersection) / ((pred_binary * rois).sum() + (vessels * rois).sum() + 1e-7)
+                total_dice += dice.item()
+            
+            self.global_step += 1
+        
+        stats = {
+            'avg_loss': total_loss / num_batches,
+            'avg_dice': total_dice / num_batches,
+            'avg_dice_loss_roi': total_dice_loss_roi / num_batches,
+            'avg_loss_topo': total_loss_topo / num_batches,
+            'avg_topo_raw': total_topo_raw / num_batches,
+            'avg_topo_scaled': total_topo_scaled / num_batches,
+            'avg_ratio': total_ratio / num_batches,
+            'roi_mean': total_roi_mean / num_batches,
+        }
+        
+        return stats
+    
+    @torch.no_grad()
+    def validate(self, val_loader: DataLoader) -> Dict[str, float]:
+        """验证"""
+        self.model.eval()
+        
+        all_preds = []
+        all_masks = []
+        all_rois = []
+        
+        for batch in tqdm(val_loader, desc='Validate', leave=False):
+            if isinstance(batch, (list, tuple)) and len(batch) == 3:
+                images, vessels, rois = batch
+                images = images.to(self.device)
+                vessels = vessels.to(self.device)
+                rois = self._normalize_roi_tensor(rois, self.device)
+            else:
+                images = batch['image'].to(self.device)
+                vessels = batch['vessel'].to(self.device)
+                rois = self._normalize_roi_tensor(batch['roi'], self.device)
+            
+            outputs = self.model(images)
+            pred = torch.sigmoid(outputs)
+            
+            all_preds.append(pred)
+            all_masks.append(vessels)
+            all_rois.append(rois)
+        
+        all_preds = torch.cat(all_preds, dim=0).cpu().numpy()
+        all_masks = torch.cat(all_masks, dim=0).cpu().numpy()
+        all_rois = torch.cat(all_rois, dim=0).cpu().numpy()
+        
+        all_dice, all_iou, all_prec, all_rec = [], [], [], []
+        all_cl_break, all_delta_beta0 = [], []
+        
+        for i in range(len(all_preds)):
+            roi = all_rois[i, 0] if all_rois.ndim == 4 else all_rois[i]
+            
+            m = compute_basic_metrics(all_preds[i, 0], all_masks[i, 0], roi)
+            all_dice.append(m['dice'])
+            all_iou.append(m['iou'])
+            all_prec.append(m['precision'])
+            all_rec.append(m['recall'])
+            
+            try:
+                topo_m = compute_topology_metrics(all_preds[i, 0], all_masks[i, 0], roi)
+                all_cl_break.append(topo_m['cl_break'])
+                all_delta_beta0.append(topo_m['delta_beta0'])
+            except Exception:
+                all_cl_break.append(0.0)
+                all_delta_beta0.append(0.0)
+        
+        metrics = {
+            'dice': np.mean(all_dice),
+            'iou': np.mean(all_iou),
+            'precision': np.mean(all_prec),
+            'recall': np.mean(all_rec),
+            'cl_break': np.mean(all_cl_break) if all_cl_break else 0.0,
+            'delta_beta0': np.mean(all_delta_beta0) if all_delta_beta0 else 0.0
+        }
+        
+        return metrics
+    
+    def train(self, train_loader: DataLoader, val_loader: DataLoader) -> None:
+        """主训练循环"""
+        self.start_time = datetime.now()
+        max_epochs = self.config['training']['max_epochs']
+        
+        if self.enable_early_stopping:
+            print(f'\n早停: 启用 (耐心值={self.config["training"]["patience"]})')
+        else:
+            print(f'\n早停: 禁用 (将跑满{max_epochs}轮)')
+        
+        print(f'开始训练 (Topo-ROI对齐版)')
+        print(f'总轮数: {max_epochs}')
+        print(f'关键修改: Dice loss在ROI内计算')
+        print(f'开始时间: {self.start_time.strftime("%Y-%m-%d %H:%M:%S")}')
+        print('=' * 80)
+        
+        roi_mode = self.config.get('data', {}).get('kaggle_roi', {}).get('mode', 'fov')
+        
+        for epoch in range(max_epochs):
+            self.current_epoch = epoch + 1
+            
+            train_stats = self.train_epoch(train_loader, epoch)
+            train_loss = train_stats['avg_loss']
+            train_dice = train_stats['avg_dice']
+            train_dice_loss_roi = train_stats['avg_dice_loss_roi']
+            train_loss_topo = train_stats['avg_loss_topo']
+            train_topo_raw = train_stats['avg_topo_raw']
+            train_topo_scaled = train_stats['avg_topo_scaled']
+            train_ratio = train_stats['avg_ratio']
+            train_roi_mean = train_stats['roi_mean']
+            
+            val_metrics = self.validate(val_loader)
+            val_dice = val_metrics['dice']
+            
+            self.scheduler.step()
+            current_lr = self.scheduler.get_last_lr()[0]
+            
+            current_lambda = self.lambda_scheduler.get_lambda(epoch)
+            
+            elapsed = (datetime.now() - self.start_time).total_seconds()
+            epoch_time = elapsed / self.current_epoch
+            eta = epoch_time * (max_epochs - self.current_epoch)
+            
+            print(f'\nEpoch {self.current_epoch}/{max_epochs}  (λ={current_lambda:.3f})')
+            print(f'  Train Dice Loss (ROI): {train_dice_loss_roi:.4f} | Train Dice (ROI): {train_dice:.4f} | Train Topo: {train_loss_topo:.4f}')
+            print(f'  Val Dice: {val_dice:.4f} | Val IoU: {val_metrics["iou"]:.4f} | Val Prec: {val_metrics["precision"]:.4f} | Val Rec: {val_metrics["recall"]:.4f}')
+            print(f'  CL-Break: {val_metrics.get("cl_break", 0):.1f} | Δβ₀: {val_metrics.get("delta_beta0", 0):.1f}')
+            print(f'  Ratio: {train_ratio:.4f} | TopoScaled: {train_topo_scaled:.4f}')
+            print(f'  ROI Mean: {train_roi_mean:.4f} | ROI Mode: {roi_mode}')
+            print(f'  Each Time: {self.format_time(epoch_time)} | Total Time: {self.format_time(elapsed)} | ETA: {self.format_time(eta)} | LR: {current_lr:.6f}')
+            
+            with open(self.log_file, 'a') as f:
+                f.write(f'{self.current_epoch},{train_loss:.4f},{train_dice:.4f},{train_dice_loss_roi:.6f},{train_loss_topo:.4f},'
+                       f'{val_dice:.4f},{val_metrics["iou"]:.4f},{val_metrics["precision"]:.4f},{val_metrics["recall"]:.4f},'
+                       f'{val_metrics.get("cl_break", 0):.1f},{val_metrics.get("delta_beta0", 0):.1f},'
+                       f'{current_lambda:.3f},{current_lr:.6f},'
+                       f'{train_topo_raw:.6f},{train_topo_scaled:.6f},{train_ratio:.6f},'
+                       f'{roi_mode},{train_roi_mean:.4f}\n')
+            
+            if val_dice > self.best_val_dice:
+                self.best_val_dice = val_dice
+                torch.save({
+                    'epoch': self.current_epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'val_dice': val_dice,
+                }, self.checkpoint_dir / 'best_model_topo_roi.pth')
+            
+            if self.enable_early_stopping and self.early_stopping(val_dice, self.current_epoch):
+                print(f'\n早停触发！最佳epoch: {self.early_stopping.best_epoch}, 最佳val_dice: {self.early_stopping.best_value:.4f}')
+                break
+        
+        torch.save({
+            'epoch': max_epochs,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+        }, self.checkpoint_dir / 'final_model_topo_roi.pth')
+        
+        total_time = (datetime.now() - self.start_time).total_seconds()
+        print('\n' + '=' * 80)
+        print('训练完成')
+        print(f'开始时间: {self.start_time.strftime("%Y-%m-%d %H:%M:%S")}')
+        print(f'结束时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+        print(f'总用时: {total_time//60:.0f}m {total_time%60:.0f}s')
+        print(f'最佳验证Dice: {self.best_val_dice:.4f}')
+        print(f'最佳模型: {self.checkpoint_dir / "best_model_topo_roi.pth"}')
+        print('=' * 80)
+
+
+def set_seed(seed: int = 42) -> None:
+    """设置随机种子"""
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def main():
+    """主函数"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='端到端拓扑正则训练（ROI对齐版）')
+    parser.add_argument('--epochs', type=int, default=20, help='训练轮数')
+    args = parser.parse_args()
+    
+    with open('config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+    
+    set_seed(config['training'].get('seed', 42))
+    
+    if args.epochs:
+        config['training']['max_epochs'] = args.epochs
+    
+    trainer = TrainerWithTopologyROI(config, args)
+    train_loader, val_loader, _ = get_combined_loaders(config)
+    trainer.train(train_loader, val_loader)
+
+
+if __name__ == '__main__':
+    main()
