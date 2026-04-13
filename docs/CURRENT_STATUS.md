@@ -43,6 +43,15 @@
 - `train_topo_roi.py` 的 `--loss-mode` 仅保留兼容入口：主线固定使用 `fragment_suppress`，非该值不会切换实际 loss。
 - 规则文档：`docs/TRAIN_TOPO_ENTRY_RULES.md`。
 
+## 7) FS 变体实验线（隔离）
+
+- 当前主线仍然是 `fragment_suppress`，主线结论和 125e 对照结论不变。
+- 新增 `thresholded_fs` 与 `topk_fs` 两条实验验证线，但它们只用于旁路验证，不得替代当前主线结论。
+- 默认配置继续显式使用 `topology.variant: fragment_suppress`。
+- `fragment_tau` / `fragment_topk` 只在实验配置里维护，不挂在默认主线配置里。
+- 40e 快速验证配置位于 `configs/experiments/`，并通过独立输出目录和 variant-aware 文件名避免覆盖主线产物。
+- 简短说明见 `reports/FS_VARIANTS_NOTE.md`。
+
 ## 30 秒口播版
 
 - 最强 baseline 是 `Baseline-ROI`，best Dice 0.7841。

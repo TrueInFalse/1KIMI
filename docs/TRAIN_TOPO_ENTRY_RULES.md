@@ -21,6 +21,17 @@
 - 主线行为：训练时固定使用 `fragment_suppress`。
 - 说明：传入 `standard`/`main_component` 仅输出兼容提示，不会切换实际 loss 数学逻辑。
 
+## 3.5) `topology.variant` 当前行为
+
+- 实际拓扑分支由 config 中的 `topology.variant` 决定。
+- 默认主线值仍然是 `fragment_suppress`。
+- 可选实验值：
+  - `thresholded_fs`
+  - `topk_fs`
+- `fragment_tau` 仅在 `thresholded_fs` 下生效。
+- `fragment_topk` 仅在 `topk_fs` 下生效。
+- `--loss-mode` 继续只作为旧入口兼容参数，不负责切换当前实验分支。
+
 ## 4) 当前推荐运行命令（主线）
 
 ```bash

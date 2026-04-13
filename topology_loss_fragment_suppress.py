@@ -12,7 +12,7 @@ import torch.nn as nn
 import cripser
 
 
-class TopologicalRegularizerFragmentSuppress(nn.Module):
+class _LegacyTopologicalRegularizerFragmentSuppress(nn.Module):
     """
     拓扑正则化器（主线 Fragment-Suppress 版）
 
@@ -166,4 +166,236 @@ class TopologicalRegularizerFragmentSuppress(nn.Module):
 
 
 # 兼容别名
+
+
+SUPPORTED_FS_VARIANTS = {
+    'fragment_suppress',
+    'thresholded_fs',
+    'topk_fs',
+}
+
+
+class TopologicalRegularizerFragmentSuppress(nn.Module):
+    """Frozen FS mainline plus two opt-in experimental variants."""
+
+    def __init__(
+        self,
+        target_beta0: int = 5,
+        max_death: float = 0.5,
+        loss_scale: float = 100.0,
+        fragment_penalty_factor: float = 1.0,
+        loss_mode: str = 'fragment_suppress',
+        target_lifetime: float = 0.5,
+        main_boost_factor: float = 1.0,
+        variant: str = None,
+        fragment_tau: float = 0.01,
+        fragment_topk: int = 4,
+    ):
+        super().__init__()
+        self.target_beta0 = target_beta0
+        self.max_death = max_death
+        self.loss_scale = loss_scale
+        self.fragment_penalty_factor = fragment_penalty_factor
+        self.target_lifetime = target_lifetime
+        self.main_boost_factor = main_boost_factor
+        self.fragment_tau = float(fragment_tau)
+        self.fragment_topk = max(0, int(fragment_topk))
+
+        self.variant = self._resolve_variant(variant=variant, loss_mode=loss_mode)
+        self.loss_mode = self.variant
+
+        variant_parts = [
+            f"variant={self.variant}",
+            f"loss_scale={loss_scale}",
+            f"fragment_penalty_factor={fragment_penalty_factor}",
+        ]
+        if self.variant == 'thresholded_fs':
+            variant_parts.append(f"fragment_tau={self.fragment_tau}")
+        elif self.variant == 'topk_fs':
+            variant_parts.append(f"fragment_topk={self.fragment_topk}")
+        print(f"[topology-loss] {' | '.join(variant_parts)}")
+
+    @staticmethod
+    def _resolve_variant(variant: str, loss_mode: str) -> str:
+        if variant is not None:
+            if variant not in SUPPORTED_FS_VARIANTS:
+                raise ValueError(
+                    f"Unsupported topology variant: {variant}. "
+                    f"Expected one of {sorted(SUPPORTED_FS_VARIANTS)}."
+                )
+            return variant
+
+        if loss_mode in SUPPORTED_FS_VARIANTS:
+            return loss_mode
+
+        if loss_mode not in (None, 'fragment_suppress'):
+            print(
+                "[compat] legacy loss_mode is ignored for FS variants; "
+                f"falling back to fragment_suppress (received: {loss_mode})"
+            )
+        return 'fragment_suppress'
+
+    def forward(
+        self,
+        prob_map: torch.Tensor,
+        roi_mask: torch.Tensor = None,
+        epoch: int = None,
+    ) -> torch.Tensor:
+        batch_size = prob_map.shape[0]
+        device = prob_map.device
+
+        if prob_map.dim() == 4:
+            prob_map = prob_map.squeeze(1)
+
+        if roi_mask is not None and roi_mask.dim() == 4:
+            roi_mask = roi_mask.squeeze(1)
+
+        losses = []
+        pd_stats = []
+
+        for i in range(batch_size):
+            prob = prob_map[i]
+
+            if roi_mask is not None:
+                roi = roi_mask[i]
+                prob = prob * roi
+
+            filtration = 1.0 - prob
+            if filtration.dim() > 2:
+                filtration = filtration.squeeze()
+
+            pd = cripser.compute_ph_torch(
+                filtration,
+                maxdim=0,
+                filtration="V",
+            )
+
+            dim0_mask = pd[:, 0] == 0
+            births = pd[dim0_mask, 1]
+            deaths = pd[dim0_mask, 2]
+
+            finite_mask = torch.isfinite(deaths)
+            if finite_mask.sum() == 0:
+                losses.append(torch.tensor(0.0, device=device))
+                pd_stats.append(self._empty_pd_stats())
+                continue
+
+            births_finite = births[finite_mask]
+            deaths_finite = deaths[finite_mask]
+            lifetimes = deaths_finite - births_finite
+            sorted_lifetimes, _ = torch.sort(lifetimes, descending=True)
+
+            stats = self._collect_pd_stats(sorted_lifetimes)
+            loss_i, variant_stats = self._compute_variant_loss(sorted_lifetimes)
+            stats.update(variant_stats)
+
+            pd_stats.append(stats)
+            losses.append(loss_i)
+
+        self.last_pd_stats = pd_stats
+        return torch.stack(losses).mean() * self.loss_scale
+
+    @staticmethod
+    def _empty_pd_stats() -> dict:
+        return {
+            'num_finite': 0,
+            'max_lifetime': 0.0,
+            'top5_lifetimes': [],
+            'fragments_mean': 0.0,
+            'active_fragments_mean': 0.0,
+            'active_fragments_count': 0,
+            'selected_topk_mean': 0.0,
+            'selected_topk_count': 0,
+        }
+
+    @staticmethod
+    def _collect_pd_stats(sorted_lifetimes: torch.Tensor) -> dict:
+        num_finite = len(sorted_lifetimes)
+        max_lifetime = sorted_lifetimes[0].item() if num_finite > 0 else 0.0
+        top5 = [
+            sorted_lifetimes[i].item() if i < num_finite else 0.0
+            for i in range(min(5, num_finite))
+        ]
+        fragments_mean = (
+            sorted_lifetimes[1:].mean().item() if num_finite > 1 else 0.0
+        )
+        return {
+            'num_finite': num_finite,
+            'max_lifetime': max_lifetime,
+            'top5_lifetimes': top5,
+            'fragments_mean': fragments_mean,
+            'active_fragments_mean': 0.0,
+            'active_fragments_count': 0,
+            'selected_topk_mean': 0.0,
+            'selected_topk_count': 0,
+        }
+
+    @staticmethod
+    def _zero_like(sorted_lifetimes: torch.Tensor) -> torch.Tensor:
+        return torch.tensor(0.0, device=sorted_lifetimes.device)
+
+    @staticmethod
+    def _secondary_lifetimes(sorted_lifetimes: torch.Tensor) -> torch.Tensor:
+        if len(sorted_lifetimes) <= 1:
+            return sorted_lifetimes.new_zeros((0,))
+        return sorted_lifetimes[1:]
+
+    def _compute_variant_loss(self, sorted_lifetimes: torch.Tensor):
+        if self.variant == 'fragment_suppress':
+            return self._fragment_suppress_loss(sorted_lifetimes), {}
+        if self.variant == 'thresholded_fs':
+            return self._thresholded_fs_loss(sorted_lifetimes)
+        if self.variant == 'topk_fs':
+            return self._topk_fs_loss(sorted_lifetimes)
+        raise RuntimeError(f"Unhandled topology variant: {self.variant}")
+
+    def _fragment_suppress_loss(self, sorted_lifetimes: torch.Tensor) -> torch.Tensor:
+        """Reference mainline FS formula. Do not change this behavior."""
+        if len(sorted_lifetimes) <= 1:
+            return self._zero_like(sorted_lifetimes)
+
+        fragment_lifetimes = sorted_lifetimes[1:]
+        loss = fragment_lifetimes.pow(2).mean() * self.fragment_penalty_factor
+        return loss
+
+    def _thresholded_fs_loss(self, sorted_lifetimes: torch.Tensor):
+        secondary_lifetimes = self._secondary_lifetimes(sorted_lifetimes)
+        if secondary_lifetimes.numel() == 0:
+            return self._zero_like(sorted_lifetimes), {
+                'active_fragments_mean': 0.0,
+                'active_fragments_count': 0,
+            }
+
+        excess_lifetimes = torch.relu(secondary_lifetimes - self.fragment_tau)
+        loss = excess_lifetimes.pow(2).mean() * self.fragment_penalty_factor
+
+        active_mask = secondary_lifetimes > self.fragment_tau
+        active_lifetimes = secondary_lifetimes[active_mask]
+        return loss, {
+            'active_fragments_mean': (
+                active_lifetimes.mean().item() if active_lifetimes.numel() > 0 else 0.0
+            ),
+            'active_fragments_count': int(active_mask.sum().item()),
+        }
+
+    def _topk_fs_loss(self, sorted_lifetimes: torch.Tensor):
+        secondary_lifetimes = self._secondary_lifetimes(sorted_lifetimes)
+        if secondary_lifetimes.numel() == 0 or self.fragment_topk <= 0:
+            return self._zero_like(sorted_lifetimes), {
+                'selected_topk_mean': 0.0,
+                'selected_topk_count': 0,
+            }
+
+        selected_count = min(self.fragment_topk, secondary_lifetimes.numel())
+        selected_lifetimes = secondary_lifetimes[:selected_count]
+        loss = selected_lifetimes.pow(2).mean() * self.fragment_penalty_factor
+        return loss, {
+            'selected_topk_mean': selected_lifetimes.mean().item(),
+            'selected_topk_count': int(selected_count),
+        }
+
+    def get_last_pd_stats(self):
+        return getattr(self, 'last_pd_stats', [])
+
+
 CubicalRipserLoss = TopologicalRegularizerFragmentSuppress

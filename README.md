@@ -343,6 +343,20 @@ python visualize_results.py --log-file logs/20260405_topo_roi_fragment_suppress_
 - `evaluate.py`
 - `visualize_results.py`
 
+## Fragment-Suppress Variants (Experimental Only)
+
+- Reference mainline stays `fragment_suppress`. Its math definition and default behavior remain unchanged.
+- `thresholded_fs` and `topk_fs` are isolated validation branches only. They do not replace current README conclusions or 125e mainline results.
+- Default `config.yaml` and `config_125e.yaml` now explicitly pin `topology.variant: fragment_suppress`.
+- `fragment_tau` and `fragment_topk` are maintained in experiment configs only, not in default mainline configs.
+- Variant-specific quick-check configs live under `configs/experiments/`:
+  - `config_thresholded_fs_tau001_40e.yaml`
+  - `config_thresholded_fs_tau002_40e.yaml`
+  - `config_topk_fs_top4_40e.yaml`
+  - `config_topk_fs_top8_40e.yaml`
+- Experimental outputs are isolated with variant-aware filenames and experiment-specific log/checkpoint directories.
+- Short note: `reports/FS_VARIANTS_NOTE.md`
+
 ## Runtime Notes
 
 - `train_baseline_roi.py` and `train_topo_roi.py` now support `--fast-dev` for short diagnostic runs.

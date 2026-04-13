@@ -108,6 +108,23 @@
 | `config_125e.yaml` | 主线 125e 配置。 | current |
 | `configs/archive/config_20e.yaml` | 20e 历史对照配置。 | archive |
 
+## 4.5) FS 变体实验线（隔离）
+
+- `topology_loss_fragment_suppress.py`
+  - keeps `fragment_suppress` as the frozen reference mainline
+  - adds opt-in experimental branches `thresholded_fs` and `topk_fs`
+- `configs/experiments/`
+  - `config_thresholded_fs_tau001_40e.yaml`
+  - `config_thresholded_fs_tau002_40e.yaml`
+  - `config_topk_fs_top4_40e.yaml`
+  - `config_topk_fs_top8_40e.yaml`
+  - `fragment_tau` / `fragment_topk` are maintained here, not in default `config.yaml` or `config_125e.yaml`
+- `reports/FS_VARIANTS_NOTE.md`
+  - short note clarifying these branches are validation-only and do not overwrite current mainline claims
+- Output convention for `train_topo_roi.py`
+  - variant-aware CSV/checkpoint filenames
+  - `fragment_suppress` also keeps legacy aliases for existing mainline tooling
+
 ## 5) 轻量整理执行结果（截至当前）
 
 - 第一阶段：文档/报告/20e 配置已收束到 `docs/`、`reports/`、`configs/archive/`。

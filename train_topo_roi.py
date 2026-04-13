@@ -41,6 +41,24 @@ from utils_metrics import (
 from topology_loss_fragment_suppress import TopologicalRegularizerFragmentSuppress
 
 
+SUPPORTED_TOPOLOGY_VARIANTS = {
+    'fragment_suppress',
+    'thresholded_fs',
+    'topk_fs',
+}
+
+
+def resolve_topology_variant(config: Dict) -> str:
+    topo_cfg = config.get('topology', {})
+    variant = topo_cfg.get('variant', 'fragment_suppress')
+    if variant not in SUPPORTED_TOPOLOGY_VARIANTS:
+        raise ValueError(
+            f"Unsupported topology.variant={variant}. "
+            f"Expected one of {sorted(SUPPORTED_TOPOLOGY_VARIANTS)}."
+        )
+    return variant
+
+
 def compute_dice_loss_roi(pred_logits, target, roi_mask, eps=1e-7):
     """在ROI内计算Dice loss"""
     pred = torch.sigmoid(pred_logits)
@@ -136,10 +154,18 @@ class TrainerWithTopologyROI:
         self.args = args
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        self.checkpoint_dir = Path('./checkpoints')
-        self.log_dir = Path('./logs')
-        self.checkpoint_dir.mkdir(exist_ok=True)
-        self.log_dir.mkdir(exist_ok=True)
+        topo_cfg = config.get('topology', {})
+        self.topology_variant = resolve_topology_variant(config)
+        self.fragment_tau = float(topo_cfg.get('fragment_tau', 0.01))
+        self.fragment_topk = max(0, int(topo_cfg.get('fragment_topk', 4)))
+
+        train_cfg = config.get('training', {})
+        self.checkpoint_dir = Path(train_cfg.get('checkpoint_dir', './checkpoints'))
+        self.log_dir = Path(train_cfg.get('log_dir', './logs'))
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        self._setup_output_paths()
         
         self._setup_model()
         
@@ -147,8 +173,11 @@ class TrainerWithTopologyROI:
         topo_cfg = config.get('topology', {})
         requested_loss_mode = getattr(args, 'loss_mode', 'fragment_suppress') if args else 'fragment_suppress'
         if requested_loss_mode != 'fragment_suppress':
-            print(f"[兼容提示] 当前主线仅支持 fragment_suppress，忽略 --loss-mode={requested_loss_mode}")
-        self.loss_mode = 'fragment_suppress'
+            print(
+                f"[兼容提示] --loss-mode={requested_loss_mode} 仅保留给旧入口；"
+                f"当前实际使用 topology.variant={self.topology_variant}"
+            )
+        self.loss_mode = self.topology_variant
         self.criterion_topo = TopologicalRegularizerFragmentSuppress(
             target_beta0=topo_cfg.get('target_beta0', 5),
             max_death=topo_cfg.get('max_death', 0.5),
@@ -156,7 +185,10 @@ class TrainerWithTopologyROI:
             fragment_penalty_factor=topo_cfg.get('fragment_penalty_factor', 1.0),
             loss_mode=self.loss_mode,
             target_lifetime=topo_cfg.get('target_lifetime', 0.5),
-            main_boost_factor=topo_cfg.get('main_boost_factor', 1.0)
+            main_boost_factor=topo_cfg.get('main_boost_factor', 1.0),
+            variant=self.topology_variant,
+            fragment_tau=self.fragment_tau,
+            fragment_topk=self.fragment_topk,
         ).to(self.device)
         
         # λ调度器
@@ -182,16 +214,22 @@ class TrainerWithTopologyROI:
             self.early_stopping = None
         
         # 日志（ROI对齐版）
-        self.log_file = self.log_dir / 'training_topo_roi_log.csv'
         self._init_log(overwrite=True)
         
         self.current_epoch = 0
         self.global_step = 0
         self.best_val_dice = 0.0
         self.start_time = None
+        print(f"Topology Variant: {self.topology_variant}")
+        if self.topology_variant == 'thresholded_fs':
+            print(f"Fragment Tau: {self.fragment_tau}")
+        elif self.topology_variant == 'topk_fs':
+            print(f"Fragment TopK: {self.fragment_topk}")
+        print(f"Topo Log File: {self.log_file}")
+        print(f"Topo Best Checkpoint: {self.best_checkpoint_path}")
         
         print(f'设备: {self.device}')
-        print(f'Topo Loss: Fragment-Suppress (主线, ROI对齐版)')
+        print('Topo Loss: see Topology Variant above (fragment_suppress remains the mainline default)')
     
     def _setup_model(self) -> None:
         """初始化模型"""
@@ -219,17 +257,52 @@ class TrainerWithTopologyROI:
         
         print(f'模型参数量: {count_parameters(self.model):,}')
     
+    def _setup_output_paths(self) -> None:
+        variant_suffix = self.topology_variant
+        self.log_file = self.log_dir / f'training_topo_roi_{variant_suffix}_log.csv'
+        self.best_checkpoint_path = self.checkpoint_dir / f'best_model_topo_roi_{variant_suffix}.pth'
+        self.final_checkpoint_path = self.checkpoint_dir / f'final_model_topo_roi_{variant_suffix}.pth'
+
+        self.log_files = [self.log_file]
+        self.best_checkpoint_paths = [self.best_checkpoint_path]
+        self.final_checkpoint_paths = [self.final_checkpoint_path]
+
+        if self.topology_variant == 'fragment_suppress':
+            legacy_log = self.log_dir / 'training_topo_roi_log.csv'
+            legacy_best = self.checkpoint_dir / 'best_model_topo_roi.pth'
+            legacy_final = self.checkpoint_dir / 'final_model_topo_roi.pth'
+            if legacy_log not in self.log_files:
+                self.log_files.append(legacy_log)
+            if legacy_best not in self.best_checkpoint_paths:
+                self.best_checkpoint_paths.append(legacy_best)
+            if legacy_final not in self.final_checkpoint_paths:
+                self.final_checkpoint_paths.append(legacy_final)
+
     def _init_log(self, overwrite: bool = False) -> None:
         """初始化日志文件（ROI对齐版）"""
-        if overwrite or not self.log_file.exists():
-            with open(self.log_file, 'w') as f:
-                f.write('epoch,train_loss,train_dice,train_dice_loss_roi,train_loss_topo,'
-                       'val_dice,val_iou,val_precision,val_recall,'
-                       'cl_break,delta_beta0,pred_beta0,target_beta0,max_lifetime,fragments_mean,'
-                       'topology_valid_count,topology_invalid_count,lambda,lr,'
-                       'topo_loss_raw,topo_loss_scaled,ratio,'
-                       'roi_mode,roi_mean\n')
+        header = (
+            'epoch,train_loss,train_dice,train_dice_loss_roi,train_loss_topo,'
+            'val_dice,val_iou,val_precision,val_recall,'
+            'cl_break,delta_beta0,pred_beta0,target_beta0,max_lifetime,fragments_mean,'
+            'topology_valid_count,topology_invalid_count,lambda,lr,'
+            'topo_loss_raw,topo_loss_scaled,ratio,'
+            'roi_mode,roi_mean\n'
+        )
+        for log_path in self.log_files:
+            if overwrite or not log_path.exists():
+                with open(log_path, 'w') as f:
+                    f.write(header)
     
+    def _append_log_line(self, line: str) -> None:
+        for log_path in self.log_files:
+            with open(log_path, 'a') as f:
+                f.write(line)
+
+    @staticmethod
+    def _save_checkpoint_payload(paths: List[Path], payload: Dict[str, Any]) -> None:
+        for checkpoint_path in paths:
+            torch.save(payload, checkpoint_path)
+
     def format_time(self, seconds: float) -> str:
         """格式化时间"""
         if seconds < 60:
@@ -498,6 +571,11 @@ class TrainerWithTopologyROI:
             print(f'  Train PD MaxLifetime: {train_max_lifetime:.4f} | Train PD FragmentsMean: {train_fragments_mean:.4f}')
             print(f'  Ratio: {train_ratio:.4f} | TopoScaled: {train_topo_scaled:.4f}')
             print(f'  ROI Mean: {train_roi_mean:.4f} | ROI Mode: {roi_mode}')
+            print(f'  Topology Variant: {self.topology_variant}')
+            if self.topology_variant == 'thresholded_fs':
+                print(f'  Fragment Tau: {self.fragment_tau}')
+            elif self.topology_variant == 'topk_fs':
+                print(f'  Fragment TopK: {self.fragment_topk}')
             print(f'  Each Time: {self.format_time(epoch_time)} | Total Time: {self.format_time(elapsed)} | ETA: {self.format_time(eta)} | LR: {current_lr:.6f}')
             
             # 打印PD统计信息（主线诊断用）
@@ -508,36 +586,48 @@ class TrainerWithTopologyROI:
                 print(f'    Max Lifetime: {pd_stats["max_lifetime"]:.4f}')
                 print(f'    Top5 Lifetimes: {[f"{x:.4f}" for x in pd_stats["top5_lifetimes"]]}')
                 print(f'    Fragments Mean (excl. main): {pd_stats["fragments_mean"]:.4f}')
+                if self.topology_variant == 'thresholded_fs':
+                    print(
+                        f'    Active Fragments Mean (>tau): {pd_stats.get("active_fragments_mean", 0.0):.4f} '
+                        f'| Active Count: {int(pd_stats.get("active_fragments_count", 0))}'
+                    )
+                if self.topology_variant == 'topk_fs':
+                    print(
+                        f'    Selected TopK Mean: {pd_stats.get("selected_topk_mean", 0.0):.4f} '
+                        f'| Selected Count: {int(pd_stats.get("selected_topk_count", 0))}'
+                    )
             
-            with open(self.log_file, 'a') as f:
-                f.write(f'{self.current_epoch},{train_loss:.4f},{train_dice:.4f},{train_dice_loss_roi:.6f},{train_loss_topo:.4f},'
-                       f'{val_dice:.4f},{val_metrics["iou"]:.4f},{val_metrics["precision"]:.4f},{val_metrics["recall"]:.4f},'
-                       f'{val_metrics.get("cl_break", float("nan")):.1f},{val_metrics.get("delta_beta0", float("nan")):.1f},'
-                       f'{val_metrics.get("pred_beta0", float("nan")):.1f},{val_metrics.get("target_beta0", float("nan")):.1f},'
-                       f'{train_max_lifetime:.6f},{train_fragments_mean:.6f},'
-                       f'{int(val_metrics.get("topology_valid_count", 0))},{int(val_metrics.get("topology_invalid_count", 0))},'
-                       f'{current_lambda:.3f},{current_lr:.6f},'
-                       f'{train_topo_raw:.6f},{train_topo_scaled:.6f},{train_ratio:.6f},'
-                       f'{roi_mode},{train_roi_mean:.4f}\n')
+            log_line = (
+                f'{self.current_epoch},{train_loss:.4f},{train_dice:.4f},{train_dice_loss_roi:.6f},{train_loss_topo:.4f},'
+                f'{val_dice:.4f},{val_metrics["iou"]:.4f},{val_metrics["precision"]:.4f},{val_metrics["recall"]:.4f},'
+                f'{val_metrics.get("cl_break", float("nan")):.1f},{val_metrics.get("delta_beta0", float("nan")):.1f},'
+                f'{val_metrics.get("pred_beta0", float("nan")):.1f},{val_metrics.get("target_beta0", float("nan")):.1f},'
+                f'{train_max_lifetime:.6f},{train_fragments_mean:.6f},'
+                f'{int(val_metrics.get("topology_valid_count", 0))},{int(val_metrics.get("topology_invalid_count", 0))},'
+                f'{current_lambda:.3f},{current_lr:.6f},'
+                f'{train_topo_raw:.6f},{train_topo_scaled:.6f},{train_ratio:.6f},'
+                f'{roi_mode},{train_roi_mean:.4f}\n'
+            )
+            self._append_log_line(log_line)
             
             if val_dice > self.best_val_dice:
                 self.best_val_dice = val_dice
-                torch.save({
+                self._save_checkpoint_payload(self.best_checkpoint_paths, {
                     'epoch': self.current_epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_dice': val_dice,
-                }, self.checkpoint_dir / 'best_model_topo_roi.pth')
+                })
             
             if self.enable_early_stopping and self.early_stopping(val_dice, self.current_epoch):
                 print(f'\n早停触发！最佳epoch: {self.early_stopping.best_epoch}, 最佳val_dice: {self.early_stopping.best_value:.4f}')
                 break
         
-        torch.save({
+        self._save_checkpoint_payload(self.final_checkpoint_paths, {
             'epoch': max_epochs,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-        }, self.checkpoint_dir / 'final_model_topo_roi.pth')
+        })
         
         total_time = (datetime.now() - self.start_time).total_seconds()
         print('\n' + '=' * 80)
@@ -546,7 +636,7 @@ class TrainerWithTopologyROI:
         print(f'结束时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
         print(f'总用时: {total_time//60:.0f}m {total_time%60:.0f}s')
         print(f'最佳验证Dice: {self.best_val_dice:.4f}')
-        print(f'最佳模型: {self.checkpoint_dir / "best_model_topo_roi.pth"}')
+        print(f'最佳模型: {self.best_checkpoint_path}')
         print('=' * 80)
 
 
@@ -577,10 +667,10 @@ def main():
                         help='Disable deterministic cuDNN and enable benchmark for short diagnostic runs')
     parser.add_argument('--loss-mode', type=str, default='fragment_suppress',
                         choices=['standard', 'main_component', 'fragment_suppress'],
-                        help='Topo loss模式参数（主线固定fragment_suppress；standard/main_component仅兼容提示，不会切换实际loss）')
+                        help='旧Topo入口兼容参数；实际变体请在config中设置 topology.variant')
     args = parser.parse_args()
 
-    with open(args.config, 'r') as f:
+    with open(args.config, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
     deterministic_mode, cudnn_benchmark = set_seed(
@@ -592,17 +682,25 @@ def main():
         config['training']['max_epochs'] = args.epochs
 
     requested_loss_mode = args.loss_mode
-    effective_loss_mode = 'fragment_suppress'
+    topology_variant = resolve_topology_variant(config)
+    fragment_tau = float(config.get('topology', {}).get('fragment_tau', 0.01))
+    fragment_topk = max(0, int(config.get('topology', {}).get('fragment_topk', 4)))
 
     print(f"\n{'='*60}")
     print(f"Config: {args.config}")
     print(f"Max Epochs: {config['training']['max_epochs']} ({'CLI override' if args.epochs is not None else 'from yaml'})")
     print(f"Deterministic mode: {'ON' if deterministic_mode else 'OFF'}")
     print(f"cuDNN benchmark: {'ON' if cudnn_benchmark else 'OFF'}")
-    if requested_loss_mode == effective_loss_mode:
-        print(f"Topo Loss Mode: {effective_loss_mode} (mainline)")
-    else:
-        print(f"Topo Loss Mode: {effective_loss_mode} (requested: {requested_loss_mode}; compatibility-only, ignored)")
+    print(f"Topology Variant: {topology_variant}")
+    if topology_variant == 'fragment_suppress':
+        print("Topology Variant Role: reference mainline")
+    elif topology_variant == 'thresholded_fs':
+        print(f"Fragment Tau: {fragment_tau}")
+    elif topology_variant == 'topk_fs':
+        print(f"Fragment TopK: {fragment_topk}")
+    print(f"Legacy --loss-mode arg: {requested_loss_mode} (compatibility-only)")
+    print(f"Checkpoint Dir: {config['training'].get('checkpoint_dir', './checkpoints')}")
+    print(f"Log Dir: {config['training'].get('log_dir', './logs')}")
     print(f"{'='*60}\n")
     trainer = TrainerWithTopologyROI(config, args)
     train_loader, val_loader, _ = get_combined_loaders(config)
