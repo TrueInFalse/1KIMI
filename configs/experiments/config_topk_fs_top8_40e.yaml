@@ -1,28 +1,39 @@
+# 40 epoch 实验配置：topk_fs + topk=8
 data:
+  # 数据增强（当前仅保留翻转，不做亮度/旋转扰动）
   augmentation:
     brightness_range: 0.0
     horizontal_flip: true
     rotation_range: 0
+  # 输入分辨率
   img_size: 512
+  # Kaggle ROI 提取参数（用于联合训练时的视野区域裁剪）
   kaggle_roi:
     mode: fov
     padding_scale: 1.03
     threshold: 8
+  # DRIVE 数据根目录
   root: ./DRIVE
+  # 固定测试/训练/验证划分（复现实验）
   test_ids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
   train_ids: [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36]
+  # true: 使用 DRIVE + Kaggle 联合数据流；false: 仅 DRIVE
   use_kaggle_combined: true
   val_ids: [37, 38, 39, 40]
 
 loss:
+  # 主分割损失（binary + dice）
   mode: binary
   name: dice
 
 metrics:
+  # 是否计算拓扑指标（通常用于验证日志，不参与反传）
   compute_topology: true
+  # 拓扑指标二值化阈值
   topology_threshold: 0.5
 
 model:
+  # 模型骨干配置（UNet + ResNet34 encoder）
   activation: null
   encoder: resnet34
   encoder_weights: imagenet
@@ -30,37 +41,62 @@ model:
   pretrained: true
 
 topology:
+  # 拓扑损失变体：thresholded_fs / topk_fs
   variant: topk_fs
+  # 每多少个 step/epoch 计算一次拓扑项（1 = 每次都算）
   compute_freq: 1
+  # true 时禁用 skip（按当前实现逻辑）
   disable_skip: true
+  # true 时彻底关闭拓扑损失（仅保留分割损失）
   disable_topo_loss: false
+  # 是否启用边缘保护
   edge_protect: true
+  # thresholded_fs 下更关键；topk_fs 中通常次要
   fragment_tau: 0.01
+  # topk_fs 下生效的 top-k 数量（本文件为 8）
   fragment_topk: 8
+  # 置信度双阈值（高/低）用于筛选可靠区域
   high_confidence_thresh: 0.9
+  # 拓扑损失权重 λ 的调度策略（重点切换区）
   lambda_schedule:
+    # 训练末尾目标 λ
     final_lambda: 0.5
+    # phase1 占总训练比例
     phase1_ratio: 0.3
+    # phase2 结束时 λ
     phase2_end_lambda: 0.1
+    # phase2 占总训练比例
     phase2_ratio: 0.3
+    # phase3 结束时 λ
     phase3_end_lambda: 0.5
+    # 线性拉升阶段长度（epoch）
     ramp_epochs: 70
+    # 调度策略标识（如 '3175'，由训练代码解析）
     strategy: '3175'
+    # 预热阶段长度（epoch）
     warmup_epochs: 30
+    # 预热阶段 λ
     warmup_lambda: 0.1
+  # 拓扑损失整体缩放系数
   loss_scale: 100.0
   low_confidence_thresh: 0.1
+  # 允许的最大 death 上限（拓扑约束）
   max_death: 0.5
+  # 目标连通分量数量（β0）
   target_beta0: 5
 
 training:
+  # 训练超参数
   batch_size: 4
+  # checkpoint 与日志目录
   checkpoint_dir: ./checkpoints/experiments/topk_fs_top8_40e
   device: cuda
   enable_early_stopping: false
   learning_rate: 0.0001
   log_dir: ./logs/experiments/topk_fs_top8_40e
+  # 训练总轮数
   max_epochs: 40
   num_workers: 4
   patience: 20
+  # 随机种子（保证可复现）
   seed: 42
