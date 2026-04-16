@@ -36,6 +36,7 @@
 | `logs/20260405_baseline_roi_125e.csv` | 当前基线主证据日志（125e）。 |
 | `logs/20260405_topo_roi_fragment_suppress_125e.csv` | 当前最佳 topo 主证据日志（125e）。 |
 | `reports/MAINLINE_RESULTS_SUMMARY.md` | 当前主线统一摘要（论文/README/PPT 共用口径）。 |
+| `reports/BETTI0_AUDIT_REPORT.md` | Betti0 per-image audit summary using independent samples deduplicated by `base_image_id`. |
 | `checkpoints/best_model_baseline_roi.pth` | 当前最强 Baseline 权重。 |
 | `checkpoints/best_model_topo_roi.pth` | Topo-ROI 最佳权重。 |
 | `checkpoints/final_model_topo_roi.pth` | Topo-ROI 最终权重。 |
@@ -88,6 +89,7 @@
 | `test/threshold_sweep.py` | 阈值扫描分析脚本。 |
 | `test/test_topo_fix.py` | Topo 模块修复验证脚本。 |
 | `test/test_end_to_end.py` | 端到端导入/路径检查脚本。 |
+| `experiments/audit_betti0_per_image.py` | Betti0 audit utility that removes duplicate samples by `base_image_id` before writing CSV/report/visualizations. |
 | `test/run_topo_roi_debug.sh` | Topo ROI 调试脚本。 |
 | `test/verify_user.py` | 用户验证辅助脚本。 |
 | `test/verify_user.ipynb` | 交互式验证 notebook。 |

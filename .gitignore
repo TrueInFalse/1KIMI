@@ -20,5 +20,6 @@ artifacts/
 .tmp_torch/
 .tmp_pycache/
 .thesis/
+.tmp_mpl/
 
 WHUT-ICS-UG-Thesis/
